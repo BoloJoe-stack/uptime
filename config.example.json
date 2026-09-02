@@ -1,0 +1,9 @@
+{
+  "monthly_salary": 20000,
+  "monthly_workdays": 21.75,
+  "work_start": "09:00",
+  "work_end": "18:00",
+  "lunch_break_minutes": 60,
+  "workdays": [0, 1, 2, 3, 4],
+  "hotkeys": {}
+}
