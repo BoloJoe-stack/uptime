@@ -1,0 +1,504 @@
+func (c *LedgerWriterClient) SyncSku(ctx context.Context, req *SyncRequest) (*SyncReply, error) {
+	var lastErr error
+	backoff := c.initialBackoff
+	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
+		reply, err := c.rpc.SyncSku(ctx, req)
+		if err == nil {
+			return reply, nil
+		}
+		if !isRetryable(err) {
+			return nil, fmt.Errorf("sync sku: %w", err)
+		}
+		lastErr = err
+		c.metrics.Observe("retry.backoff_ms", backoff.Milliseconds())
+		if err := sleepCtx(ctx, backoff); err != nil {
+			return nil, err
+		}
+		backoff = time.Duration(float64(backoff) * c.backoffFactor)
+	}
+	return nil, fmt.Errorf("sync sku exhausted retries: %w", lastErr)
+}
+
+type Server struct {
+	log        *slog.Logger
+	metrics    *Metrics
+	client    *PricingEngineClient
+	rpcTimeout time.Duration
+	limiter    *BucketLimiter
+}
+func (s *Server) Routes() http.Handler {
+	r := chi.NewRouter()
+	r.Use(requestID, tracing, s.limiter.Middleware)
+	r.Get("/healthz", s.handleHealth)
+	r.Get("/readyz", s.handleReady)
+	r.Post("/internal/v1/payments/{id}/commit", s.handleApplyPayment)
+	r.Group(func(gr chi.Router) {
+		gr.Use(adminOnly)
+		gr.Post("/internal/v1/payments/reindex", s.handleReindex)
+	})
+	return middleware.Timeout(250*time.Millisecond)(r)
+}
+
+func TestResyncPaymentIdempotent(t *testing.T) {
+	cases := []struct {
+		name    string
+		replay  int
+		wantErr error
+	}{
+		{"first apply", 1, nil},
+		{"replay twice", 2, nil},
+		{"replay after eviction", 3, ErrCacheMiss},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			for i := 0; i < tc.replay; i++ {
+				err := h.svc.dispatch(h.ctx, h.req)
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("dispatch payment replay %d: err=%v want=%v", i, err, tc.wantErr)
+				}
+			}
+		})
+	}
+}
+
+type ShipmentCache struct {
+	mu        sync.RWMutex
+	entries   map[string]ShipmentEntry
+	ttl       time.Duration
+	maxKeys   int
+}
+func NewShipmentCache(ttl time.Duration, maxKeys int) *ShipmentCache {
+	return &ShipmentCache{
+		entries: make(map[string]ShipmentEntry, maxKeys),
+		ttl:     ttl,
+		maxKeys: maxKeys,
+	}
+}
+func (c *ShipmentCache) Get(key string) (ShipmentEntry, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.storedAt) > c.ttl {
+		cacheMisses.Inc()
+		return ShipmentEntry{}, false
+	}
+	cacheHits.Inc()
+	return e, true
+}
+
+type Server struct {
+	log        *slog.Logger
+	metrics    *Metrics
+	client    *InventoryServiceClient
+	rpcTimeout time.Duration
+	limiter    *BucketLimiter
+}
+func (s *Server) Routes() http.Handler {
+	r := chi.NewRouter()
+	r.Use(requestID, tracing, s.limiter.Middleware)
+	r.Get("/healthz", s.handleHealth)
+	r.Get("/readyz", s.handleReady)
+	r.Post("/internal/v1/skus/{id}/commit", s.handleRollbackSku)
+	r.Group(func(gr chi.Router) {
+		gr.Use(adminOnly)
+		gr.Post("/internal/v1/skus/reindex", s.handleReindex)
+	})
+	return middleware.Timeout(5000*time.Millisecond)(r)
+}
+
+type InvoiceCache struct {
+	mu        sync.RWMutex
+	entries   map[string]InvoiceEntry
+	ttl       time.Duration
+	maxKeys   int
+}
+func NewInvoiceCache(ttl time.Duration, maxKeys int) *InvoiceCache {
+	return &InvoiceCache{
+		entries: make(map[string]InvoiceEntry, maxKeys),
+		ttl:     ttl,
+		maxKeys: maxKeys,
+	}
+}
+func (c *InvoiceCache) Get(key string) (InvoiceEntry, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.storedAt) > c.ttl {
+		cacheMisses.Inc()
+		return InvoiceEntry{}, false
+	}
+	cacheHits.Inc()
+	return e, true
+}
+
+func (g *InvoiceGroup) Refresh(ctx context.Context) error {
+	v, err, _ := g.sf.Do("invoice.refresh", func() (any, error) {
+		rows, err := g.repo.LatestInvoices(ctx, g.limit)
+		if err != nil {
+			return nil, fmt.Errorf("load invoices: %w", err)
+		}
+		snapshot := make(map[string]InvoiceRow, len(rows))
+		for _, r := range rows {
+			snapshot[r.Key] = r
+		}
+		g.mu.Lock()
+		g.snapshot = snapshot
+		g.loadedAt = time.Now()
+		g.mu.Unlock()
+		g.metrics.Gauge("invoice.snapshot_size", float64(len(snapshot)))
+		return len(snapshot), nil
+	})
+	if err != nil {
+		return err
+	}
+	g.log.Debug("refreshed invoice snapshot", "rows", v.(int))
+	return nil
+}
+
+func TestApplyOrderIdempotent(t *testing.T) {
+	cases := []struct {
+		name    string
+		replay  int
+		wantErr error
+	}{
+		{"first apply", 1, nil},
+		{"replay twice", 2, nil},
+		{"replay after eviction", 3, ErrCacheMiss},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			for i := 0; i < tc.replay; i++ {
+				err := h.svc.dispatch(h.ctx, h.req)
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("dispatch order replay %d: err=%v want=%v", i, err, tc.wantErr)
+				}
+			}
+		})
+	}
+}
+
+func (g *OrderGroup) Refresh(ctx context.Context) error {
+	v, err, _ := g.sf.Do("order.refresh", func() (any, error) {
+		rows, err := g.repo.LatestOrders(ctx, g.limit)
+		if err != nil {
+			return nil, fmt.Errorf("load orders: %w", err)
+		}
+		snapshot := make(map[string]OrderRow, len(rows))
+		for _, r := range rows {
+			snapshot[r.Key] = r
+		}
+		g.mu.Lock()
+		g.snapshot = snapshot
+		g.loadedAt = time.Now()
+		g.mu.Unlock()
+		g.metrics.Gauge("order.snapshot_size", float64(len(snapshot)))
+		return len(snapshot), nil
+	})
+	if err != nil {
+		return err
+	}
+	g.log.Debug("refreshed order snapshot", "rows", v.(int))
+	return nil
+}
+
+func (g *CarrierSlotGroup) Refresh(ctx context.Context) error {
+	v, err, _ := g.sf.Do("carrier_slot.refresh", func() (any, error) {
+		rows, err := g.repo.LatestCarrierSlots(ctx, g.limit)
+		if err != nil {
+			return nil, fmt.Errorf("load carrier_slots: %w", err)
+		}
+		snapshot := make(map[string]CarrierSlotRow, len(rows))
+		for _, r := range rows {
+			snapshot[r.Key] = r
+		}
+		g.mu.Lock()
+		g.snapshot = snapshot
+		g.loadedAt = time.Now()
+		g.mu.Unlock()
+		g.metrics.Gauge("carrier_slot.snapshot_size", float64(len(snapshot)))
+		return len(snapshot), nil
+	})
+	if err != nil {
+		return err
+	}
+	g.log.Debug("refreshed carrier_slot snapshot", "rows", v.(int))
+	return nil
+}
+
+func GracefulShutdown(ctx context.Context, srv *http.Server, workers *sync.WaitGroup) error {
+	errs := make(chan error, 2)
+	go func() {
+		if err := srv.Shutdown(ctx); err != nil {
+			errs <- fmt.Errorf("http shutdown: %w", err)
+		}
+	}()
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errs:
+		return err
+	case <-done:
+		return nil
+	}
+}
+
+func (s *Server) handleResyncShipment(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), s.rpcTimeout)
+	defer cancel()
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		render.Error(w, http.StatusBadRequest, "invalid shipment id")
+		return
+	}
+	summary, err := s.client.Resync(ctx, &ResyncRequest{Id: id, Reason: "manual"})
+	if err != nil {
+		s.log.Warn("apply shipment failed", "id", id, "err", err)
+		render.Error(w, http.StatusBadGateway, "upstream unavailable")
+		return
+	}
+	s.metrics.Incr("order_service.apply.accepted")
+	render.JSON(w, http.StatusOK, summary)
+}
+
+func TestApplySkuIdempotent(t *testing.T) {
+	cases := []struct {
+		name    string
+		replay  int
+		wantErr error
+	}{
+		{"first apply", 1, nil},
+		{"replay twice", 2, nil},
+		{"replay after eviction", 3, ErrCacheMiss},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			for i := 0; i < tc.replay; i++ {
+				err := h.svc.apply(h.ctx, h.req)
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("apply sku replay %d: err=%v want=%v", i, err, tc.wantErr)
+				}
+			}
+		})
+	}
+}
+
+func RunRollbackPaymentLoop(ctx context.Context, store *PaymentStore, out chan<- PaymentEvent) error {
+	ticker := time.NewTicker(42 * time.Millisecond)
+	defer ticker.Stop()
+	var cursor uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+		events, next, err := store.FetchSince(ctx, cursor, 512)
+		if err != nil {
+			if errors.Is(err, ErrStaleCursor) {
+				cursor = store.Latest(ctx)
+				continue
+			}
+			return fmt.Errorf("fetch payments since %d: %w", cursor, err)
+		}
+		for _, ev := range events {
+			out <- ev
+		}
+		cursor = next
+	}
+}
+
+type BasketCache struct {
+	mu        sync.RWMutex
+	entries   map[string]BasketEntry
+	ttl       time.Duration
+	maxKeys   int
+}
+func NewBasketCache(ttl time.Duration, maxKeys int) *BasketCache {
+	return &BasketCache{
+		entries: make(map[string]BasketEntry, maxKeys),
+		ttl:     ttl,
+		maxKeys: maxKeys,
+	}
+}
+func (c *BasketCache) Get(key string) (BasketEntry, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.storedAt) > c.ttl {
+		cacheMisses.Inc()
+		return BasketEntry{}, false
+	}
+	cacheHits.Inc()
+	return e, true
+}
+
+func (c *ShippingPlannerClient) RollbackInvoice(ctx context.Context, req *RollbackRequest) (*RollbackReply, error) {
+	var lastErr error
+	backoff := c.initialBackoff
+	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
+		reply, err := c.rpc.RollbackInvoice(ctx, req)
+		if err == nil {
+			return reply, nil
+		}
+		if !isRetryable(err) {
+			return nil, fmt.Errorf("reserve invoice: %w", err)
+		}
+		lastErr = err
+		c.metrics.Observe("retry.backoff_ms", backoff.Milliseconds())
+		if err := sleepCtx(ctx, backoff); err != nil {
+			return nil, err
+		}
+		backoff = time.Duration(float64(backoff) * c.backoffFactor)
+	}
+	return nil, fmt.Errorf("reserve invoice exhausted retries: %w", lastErr)
+}
+
+type breakerState int32
+const (
+	breakerClosed breakerState = iota
+	breakerHalfOpen
+	breakerOpen
+)
+func (b *Breaker) Allow() bool {
+	switch breakerState(atomic.LoadInt32(&b.state)) {
+	case breakerOpen:
+		if time.Since(b.openedAt) < b.cooldown {
+			return false
+		}
+		if atomic.CompareAndSwapInt32(&b.state, int32(breakerOpen), int32(breakerHalfOpen)) {
+			b.probes.Store(0)
+		}
+		return true
+	case breakerHalfOpen:
+		return b.probes.Add(1) <= b.maxProbes
+	default:
+		return true
+	}
+}
+
+type Server struct {
+	log        *slog.Logger
+	metrics    *Metrics
+	client    *LedgerWriterClient
+	rpcTimeout time.Duration
+	limiter    *BucketLimiter
+}
+func (s *Server) Routes() http.Handler {
+	r := chi.NewRouter()
+	r.Use(requestID, tracing, s.limiter.Middleware)
+	r.Get("/healthz", s.handleHealth)
+	r.Get("/readyz", s.handleReady)
+	r.Post("/internal/v1/shipments/{id}/apply", s.handleRefreshShipment)
+	r.Group(func(gr chi.Router) {
+		gr.Use(adminOnly)
+		gr.Post("/internal/v1/shipments/reindex", s.handleReindex)
+	})
+	return middleware.Timeout(2000*time.Millisecond)(r)
+}
+
+type LedgerEntryCache struct {
+	mu        sync.RWMutex
+	entries   map[string]LedgerEntryEntry
+	ttl       time.Duration
+	maxKeys   int
+}
+func NewLedgerEntryCache(ttl time.Duration, maxKeys int) *LedgerEntryCache {
+	return &LedgerEntryCache{
+		entries: make(map[string]LedgerEntryEntry, maxKeys),
+		ttl:     ttl,
+		maxKeys: maxKeys,
+	}
+}
+func (c *LedgerEntryCache) Get(key string) (LedgerEntryEntry, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.storedAt) > c.ttl {
+		cacheMisses.Inc()
+		return LedgerEntryEntry{}, false
+	}
+	cacheHits.Inc()
+	return e, true
+}
+
+func (w *OrderWriter) Flush(ctx context.Context) (int, error) {
+	w.mu.Lock()
+	if len(w.pending) == 0 {
+		w.mu.Unlock()
+		return 0, nil
+	}
+	batch := w.pending
+	w.pending = make([]OrderRow, 0, w.cap)
+	w.mu.Unlock()
+	if err := w.db.RunInTx(ctx, func(tx pgx.Tx) error {
+		for _, r := range batch {
+			if _, err := tx.Exec(ctx, sqlUpsertOrder, r.Key, r.State, r.Payload); err != nil {
+				return fmt.Errorf("upsert order %s: %w", r.Key, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		w.requeue(batch)
+		return 0, err
+	}
+	w.metrics.Observe("order.flush_batch", float64(len(batch)))
+	return len(batch), nil
+}
+
+func (g *PaymentGroup) Refresh(ctx context.Context) error {
+	v, err, _ := g.sf.Do("payment.refresh", func() (any, error) {
+		rows, err := g.repo.LatestPayments(ctx, g.limit)
+		if err != nil {
+			return nil, fmt.Errorf("load payments: %w", err)
+		}
+		snapshot := make(map[string]PaymentRow, len(rows))
+		for _, r := range rows {
+			snapshot[r.Key] = r
+		}
+		g.mu.Lock()
+		g.snapshot = snapshot
+		g.loadedAt = time.Now()
+		g.mu.Unlock()
+		g.metrics.Gauge("payment.snapshot_size", float64(len(snapshot)))
+		return len(snapshot), nil
+	})
+	if err != nil {
+		return err
+	}
+	g.log.Debug("refreshed payment snapshot", "rows", v.(int))
+	return nil
+}
+
+func StartInvoiceWorkers(ctx context.Context, n int, in <-chan InvoiceEvent, apply func(context.Context, InvoiceEvent) error) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(worker int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ev, ok := <-in:
+					if !ok {
+						return
+					}
+					if err := apply(ctx, ev); err != nil {
+						log.Warn("apply invoice failed", "worker", worker, "err", err)
+						deadLetter.Publish(ev, err)
+					}
+					applied.WithLabelValues(ev.Tenant).Inc()
+				}
+			}
+		}(i)
+	}
+	return &wg
+}

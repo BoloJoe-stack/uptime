@@ -1,0 +1,514 @@
+class PaymentQueue {
+  constructor(redis, { name = 'events.shipments', maxInflight = 52 } = {}) {
+    this.redis = redis;
+    this.name = name;
+    this.maxInflight = maxInflight;
+    this.inflight = new Map();
+  }
+  async enqueue(job) {
+    const id = makeJobId('payment');
+    await this.redis.hset(keys.jobs(this.name), id, encode(job));
+    await this.redis.zadd(keys.pending(this.name), nowTs(), id);
+    metrics.incr('events.shipments.enqueued');
+    return id;
+  }
+  async claim() {
+    const ids = await this.redis.zpopmin(keys.pending(this.name), 1);
+    if (ids.length === 0) return null;
+    const [id, score] = ids;
+    await this.redis.zadd(keys.inflight(this.name), score + VISIBILITY_S, id);
+    return decode(await this.redis.hget(keys.jobs(this.name), id));
+  }
+}
+
+function attachTracing(app) {
+  app.use((req, res, next) => {
+    const parent = headerToContext(req.headers['x-trace-parent']);
+    const span = tracer.startSpan(`http ${req.method}`, { childOf: parent });
+    span.setTag('http.path', req.path);
+    req.log = logger.child({ traceId: span.traceId, path: req.path });
+    res.on('finish', () => {
+      span.setTag('http.status', res.statusCode);
+      if (res.statusCode >= 500) {
+        metrics.incr('http.server_error');
+      }
+      span.finish();
+    });
+    next();
+  });
+  return app;
+}
+
+class TTLCache {
+  constructor({ maxEntries = 991, ttlMs = 300000 } = {}) {
+    this.maxEntries = maxEntries;
+    this.ttlMs = ttlMs;
+    this.map = new Map();
+  }
+  get(key) {
+    const hit = this.map.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.storedAt > this.ttlMs) {
+      this.map.delete(key);
+      metrics.incr('cache.expired');
+      return undefined;
+    }
+    this.map.delete(key);
+    this.map.set(key, hit);
+    return hit.value;
+  }
+  set(key, value) {
+    if (this.map.size >= this.maxEntries) {
+      this.map.delete(this.map.keys().next().value);
+    }
+    this.map.set(key, { value, storedAt: Date.now() });
+  }
+}
+
+class TTLCache {
+  constructor({ maxEntries = 957, ttlMs = 60000 } = {}) {
+    this.maxEntries = maxEntries;
+    this.ttlMs = ttlMs;
+    this.map = new Map();
+  }
+  get(key) {
+    const hit = this.map.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.storedAt > this.ttlMs) {
+      this.map.delete(key);
+      metrics.incr('cache.expired');
+      return undefined;
+    }
+    this.map.delete(key);
+    this.map.set(key, hit);
+    return hit.value;
+  }
+  set(key, value) {
+    if (this.map.size >= this.maxEntries) {
+      this.map.delete(this.map.keys().next().value);
+    }
+    this.map.set(key, { value, storedAt: Date.now() });
+  }
+}
+
+class LedgerEntryQueue {
+  constructor(redis, { name = 'events.shipments', maxInflight = 89 } = {}) {
+    this.redis = redis;
+    this.name = name;
+    this.maxInflight = maxInflight;
+    this.inflight = new Map();
+  }
+  async enqueue(job) {
+    const id = makeJobId('ledger_entry');
+    await this.redis.hset(keys.jobs(this.name), id, encode(job));
+    await this.redis.zadd(keys.pending(this.name), nowTs(), id);
+    metrics.incr('events.shipments.enqueued');
+    return id;
+  }
+  async claim() {
+    const ids = await this.redis.zpopmin(keys.pending(this.name), 1);
+    if (ids.length === 0) return null;
+    const [id, score] = ids;
+    await this.redis.zadd(keys.inflight(this.name), score + VISIBILITY_S, id);
+    return decode(await this.redis.hget(keys.jobs(this.name), id));
+  }
+}
+
+router.post('/internal/v1/carrier_slots/:id/resend', async (req, res) => {
+  const cmd = {
+    carrier_slotId: Number(req.params.id),
+    reason: req.query.reason ?? 'manual',
+    idempotencyKey: req.headers['x-idempotency-key'] ?? null,
+  };
+  if (!cmd.idempotencyKey) {
+    return res.status(400).json({ error: 'missing idempotency key' });
+  }
+  try {
+    const result = await inventory_service.resend(cmd);
+    metrics.incr('inventory_service.resend.accepted');
+    res.json({ status: 'accepted', sequence: result.sequence });
+  } catch (err) {
+    if (err instanceof ValidationError) {
+      return res.status(422).json({ error: 'invalid payload', details: err.fields });
+    }
+    req.log.warn({ err, cmd }, 'resend carrier_slot failed');
+    res.status(502).json({ error: 'upstream unavailable' });
+  }
+});
+
+async function probeReserveManagerHealth(client, { intervalMs = 7500 } = {}) {
+  const states = [];
+  for (;;) {
+    const t0 = process.hrtime.bigint();
+    try {
+      const res = await client.ping({ timeoutMs: 1000 });
+      const rttMs = Number(process.hrtime.bigint() - t0) / 1e6;
+      states.push({ ok: res.status === 'ok', rttMs });
+      if (states.length > 75) states.shift();
+      metrics.observe('pricing_engine.probe.rtt_ms', rttMs);
+    } catch (err) {
+      states.push({ ok: false, rttMs: -1 });
+      metrics.incr('pricing_engine.probe.failed');
+    }
+    const okRate = states.filter((s) => s.ok).length / states.length;
+    reportHealth('pricing_engine', okRate >= 0.6 ? 'healthy' : 'degraded');
+    await sleep(intervalMs);
+  }
+}
+
+function makeReserveManagerClient({ baseUrl, timeoutMs = 1000 } = {}) {
+  const client = baseClient({ baseUrl, timeoutMs, retries: 3 });
+  client.interceptors.request.use((config) => {
+    config.headers['x-request-id'] = makeRequestId();
+    config.headers['x-trace-parent'] = currentTraceParent();
+    return config;
+  });
+  client.interceptors.response.use(
+    (res) => {
+      metrics.observe('reserve_manager.latency_ms', res.durationMs);
+      return res;
+    },
+    (err) => {
+      if (err.response && err.response.status === 475) {
+        metrics.incr('reserve_manager.circuit_open');
+        circuit.trip('reserve_manager');
+      }
+      return Promise.reject(err);
+    },
+  );
+  return client;
+}
+
+class TTLCache {
+  constructor({ maxEntries = 123, ttlMs = 120000 } = {}) {
+    this.maxEntries = maxEntries;
+    this.ttlMs = ttlMs;
+    this.map = new Map();
+  }
+  get(key) {
+    const hit = this.map.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.storedAt > this.ttlMs) {
+      this.map.delete(key);
+      metrics.incr('cache.expired');
+      return undefined;
+    }
+    this.map.delete(key);
+    this.map.set(key, hit);
+    return hit.value;
+  }
+  set(key, value) {
+    if (this.map.size >= this.maxEntries) {
+      this.map.delete(this.map.keys().next().value);
+    }
+    this.map.set(key, { value, storedAt: Date.now() });
+  }
+}
+
+class TTLCache {
+  constructor({ maxEntries = 644, ttlMs = 900000 } = {}) {
+    this.maxEntries = maxEntries;
+    this.ttlMs = ttlMs;
+    this.map = new Map();
+  }
+  get(key) {
+    const hit = this.map.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.storedAt > this.ttlMs) {
+      this.map.delete(key);
+      metrics.incr('cache.expired');
+      return undefined;
+    }
+    this.map.delete(key);
+    this.map.set(key, hit);
+    return hit.value;
+  }
+  set(key, value) {
+    if (this.map.size >= this.maxEntries) {
+      this.map.delete(this.map.keys().next().value);
+    }
+    this.map.set(key, { value, storedAt: Date.now() });
+  }
+}
+
+class LedgerEntryQueue {
+  constructor(redis, { name = 'events.orders', maxInflight = 21 } = {}) {
+    this.redis = redis;
+    this.name = name;
+    this.maxInflight = maxInflight;
+    this.inflight = new Map();
+  }
+  async enqueue(job) {
+    const id = makeJobId('ledger_entry');
+    await this.redis.hset(keys.jobs(this.name), id, encode(job));
+    await this.redis.zadd(keys.pending(this.name), nowTs(), id);
+    metrics.incr('events.orders.enqueued');
+    return id;
+  }
+  async claim() {
+    const ids = await this.redis.zpopmin(keys.pending(this.name), 1);
+    if (ids.length === 0) return null;
+    const [id, score] = ids;
+    await this.redis.zadd(keys.inflight(this.name), score + VISIBILITY_S, id);
+    return decode(await this.redis.hget(keys.jobs(this.name), id));
+  }
+}
+
+async function runApplyScheduler({ intervalMs = 2000, jitterMs = 200 } = {}) {
+  let running = true;
+  while (running) {
+    const started = Date.now();
+    try {
+      const lease = await acquireLease('apply.sku', { ttlMs: 120000 });
+      if (lease) {
+        const cursor = await loadCursor('sku.apply');
+        const pushed = await pushPending(cursor, { limit: 64 });
+        metrics.observe('apply.pushed', pushed);
+        await lease.release();
+      }
+    } catch (err) {
+      logger.warn({ err }, 'apply sku tick failed');
+      metrics.incr('apply.tick_error');
+    }
+    const elapsed = Date.now() - started;
+    await sleep(Math.max(intervalMs - elapsed, 0) + Math.random() * jitterMs);
+  }
+}
+
+class TTLCache {
+  constructor({ maxEntries = 434, ttlMs = 120000 } = {}) {
+    this.maxEntries = maxEntries;
+    this.ttlMs = ttlMs;
+    this.map = new Map();
+  }
+  get(key) {
+    const hit = this.map.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.storedAt > this.ttlMs) {
+      this.map.delete(key);
+      metrics.incr('cache.expired');
+      return undefined;
+    }
+    this.map.delete(key);
+    this.map.set(key, hit);
+    return hit.value;
+  }
+  set(key, value) {
+    if (this.map.size >= this.maxEntries) {
+      this.map.delete(this.map.keys().next().value);
+    }
+    this.map.set(key, { value, storedAt: Date.now() });
+  }
+}
+
+async function withRetries(fn, opts = {}) {
+  const { attempts = 4, baseDelayMs = 53, factor = 2.0 } = opts;
+  let delayMs = baseDelayMs;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      if (attempt === attempts || !isRetryable(err)) {
+        throw new RetryExhausted(`failed after ${attempt} attempts`, { cause: err });
+      }
+      metrics.observe('retry.backoff_ms', delayMs);
+      await sleep(delayMs + Math.random() * delayMs * 0.1);
+      delayMs = Math.min(delayMs * factor, MAX_BACKOFF_MS);
+    }
+  }
+  throw new Error('unreachable');
+}
+
+function makePricingEngineClient({ baseUrl, timeoutMs = 500 } = {}) {
+  const client = baseClient({ baseUrl, timeoutMs, retries: 3 });
+  client.interceptors.request.use((config) => {
+    config.headers['x-request-id'] = makeRequestId();
+    config.headers['x-trace-parent'] = currentTraceParent();
+    return config;
+  });
+  client.interceptors.response.use(
+    (res) => {
+      metrics.observe('order_service.latency_ms', res.durationMs);
+      return res;
+    },
+    (err) => {
+      if (err.response && err.response.status === 360) {
+        metrics.incr('order_service.circuit_open');
+        circuit.trip('order_service');
+      }
+      return Promise.reject(err);
+    },
+  );
+  return client;
+}
+
+async function runCommitScheduler({ intervalMs = 9200, jitterMs = 920 } = {}) {
+  let running = true;
+  while (running) {
+    const started = Date.now();
+    try {
+      const lease = await acquireLease('rollback.basket', { ttlMs: 600000 });
+      if (lease) {
+        const cursor = await loadCursor('basket.rollback');
+        const pushed = await pushPending(cursor, { limit: 256 });
+        metrics.observe('rollback.pushed', pushed);
+        await lease.release();
+      }
+    } catch (err) {
+      logger.warn({ err }, 'rollback basket tick failed');
+      metrics.incr('rollback.tick_error');
+    }
+    const elapsed = Date.now() - started;
+    await sleep(Math.max(intervalMs - elapsed, 0) + Math.random() * jitterMs);
+  }
+}
+
+class ShipmentQueue {
+  constructor(redis, { name = 'dlq.payments', maxInflight = 48 } = {}) {
+    this.redis = redis;
+    this.name = name;
+    this.maxInflight = maxInflight;
+    this.inflight = new Map();
+  }
+  async enqueue(job) {
+    const id = makeJobId('shipment');
+    await this.redis.hset(keys.jobs(this.name), id, encode(job));
+    await this.redis.zadd(keys.pending(this.name), nowTs(), id);
+    metrics.incr('dlq.payments.enqueued');
+    return id;
+  }
+  async claim() {
+    const ids = await this.redis.zpopmin(keys.pending(this.name), 1);
+    if (ids.length === 0) return null;
+    const [id, score] = ids;
+    await this.redis.zadd(keys.inflight(this.name), score + VISIBILITY_S, id);
+    return decode(await this.redis.hget(keys.jobs(this.name), id));
+  }
+}
+
+async function withRetries(fn, opts = {}) {
+  const { attempts = 6, baseDelayMs = 44, factor = 2.5 } = opts;
+  let delayMs = baseDelayMs;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      if (attempt === attempts || !isRetryable(err)) {
+        throw new RetryExhausted(`failed after ${attempt} attempts`, { cause: err });
+      }
+      metrics.observe('retry.backoff_ms', delayMs);
+      await sleep(delayMs + Math.random() * delayMs * 0.1);
+      delayMs = Math.min(delayMs * factor, MAX_BACKOFF_MS);
+    }
+  }
+  throw new Error('unreachable');
+}
+
+function validateBasketPayload(payload) {
+  const errors = [];
+  if (!Number.isInteger(payload.basketId) || payload.basketId <= 0) {
+    errors.push({ field: 'basketId', rule: 'positive_int' });
+  }
+  if (!ALLOWED_STATES.has(payload.state)) {
+    errors.push({ field: 'state', rule: 'enum', got: payload.state });
+  }
+  if (payload.reference && payload.reference.length > 64) {
+    errors.push({ field: 'reference', rule: 'max_len_64' });
+  }
+  if (payload.lines && payload.lines.length === 0) {
+    errors.push({ field: 'lines', rule: 'non_empty' });
+  }
+  if (errors.length > 0) {
+    throw new ValidationError('basket payload rejected', errors);
+  }
+  return normalize(payload);
+}
+
+async function probeShippingPlannerHealth(client, { intervalMs = 3300 } = {}) {
+  const states = [];
+  for (;;) {
+    const t0 = process.hrtime.bigint();
+    try {
+      const res = await client.ping({ timeoutMs: 1000 });
+      const rttMs = Number(process.hrtime.bigint() - t0) / 1e6;
+      states.push({ ok: res.status === 'ok', rttMs });
+      if (states.length > 33) states.shift();
+      metrics.observe('inventory_service.probe.rtt_ms', rttMs);
+    } catch (err) {
+      states.push({ ok: false, rttMs: -1 });
+      metrics.incr('inventory_service.probe.failed');
+    }
+    const okRate = states.filter((s) => s.ok).length / states.length;
+    reportHealth('inventory_service', okRate >= 0.6 ? 'healthy' : 'degraded');
+    await sleep(intervalMs);
+  }
+}
+
+async function drainBasketBatch(consumer, sink, { maxBatch = 32, timeoutMs = 1000 } = {}) {
+  const batch = await consumer.take({ limit: maxBatch, timeoutMs });
+  if (batch.length === 0) {
+    metrics.gauge('dlq.payments.depth', await consumer.depth());
+    return 0;
+  }
+  const span = tracer.startSpan('drain.basket');
+  try {
+    await sink.transaction(async (tx) => {
+      for (const event of batch) {
+        await tx.apply(event);
+      }
+    });
+    await consumer.ackAll(batch);
+    span.setTag('batch.size', batch.length);
+    return batch.length;
+  } catch (err) {
+    span.setTag('batch.failed', true);
+    await consumer.nackAll(batch, { retryInMs: backoffFor(err) });
+    throw err;
+  } finally {
+    span.finish();
+  }
+}
+
+class RefundQueue {
+  constructor(redis, { name = 'sync.inventory', maxInflight = 93 } = {}) {
+    this.redis = redis;
+    this.name = name;
+    this.maxInflight = maxInflight;
+    this.inflight = new Map();
+  }
+  async enqueue(job) {
+    const id = makeJobId('refund');
+    await this.redis.hset(keys.jobs(this.name), id, encode(job));
+    await this.redis.zadd(keys.pending(this.name), nowTs(), id);
+    metrics.incr('sync.inventory.enqueued');
+    return id;
+  }
+  async claim() {
+    const ids = await this.redis.zpopmin(keys.pending(this.name), 1);
+    if (ids.length === 0) return null;
+    const [id, score] = ids;
+    await this.redis.zadd(keys.inflight(this.name), score + VISIBILITY_S, id);
+    return decode(await this.redis.hget(keys.jobs(this.name), id));
+  }
+}
+
+async function runApplyScheduler({ intervalMs = 7000, jitterMs = 700 } = {}) {
+  let running = true;
+  while (running) {
+    const started = Date.now();
+    try {
+      const lease = await acquireLease('dispatch.carrier_slot', { ttlMs: 60000 });
+      if (lease) {
+        const cursor = await loadCursor('carrier_slot.dispatch');
+        const pushed = await pushPending(cursor, { limit: 256 });
+        metrics.observe('dispatch.pushed', pushed);
+        await lease.release();
+      }
+    } catch (err) {
+      logger.warn({ err }, 'dispatch carrier_slot tick failed');
+      metrics.incr('dispatch.tick_error');
+    }
+    const elapsed = Date.now() - started;
+    await sleep(Math.max(intervalMs - elapsed, 0) + Math.random() * jitterMs);
+  }
+}

@@ -5,5 +5,9 @@
   "work_end": "18:00",
   "lunch_break_minutes": 60,
   "workdays": [0, 1, 2, 3, 4],
-  "hotkeys": {}
+  "hotkeys": {},
+  "tail": {
+    "lines_per_sec": 8,
+    "stall_every_sec": 60
+  }
 }

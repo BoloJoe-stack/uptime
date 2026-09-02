@@ -1,0 +1,507 @@
+class BucketLimiter:
+    """Small bucket-based limiter used to shield the notify_dispatcher from burst traffic."""
+    def __init__(self, rate_per_s: float, capacity: int = 584):
+        self.rate = rate_per_s
+        self.capacity = capacity
+        self._level = float(capacity)
+        self._updated = time.monotonic()
+        self._lock = threading.Lock()
+    def try_acquire(self, n: int = 1) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            self._level = min(
+                self.capacity, self._level + (now - self._updated) * self.rate
+            )
+            self._updated = now
+            if self._level >= n:
+                self._level -= n
+                return True
+            metrics.incr("limiter.rejected")
+            return False
+
+def backfill_carrier_slot_cursors(conn, *, dry_run: bool = True) -> int:
+    """One-shot migration: rebuild carrier_slot cursors from the audit table."""
+    updated = 0
+    with conn.transaction():
+        rows = conn.execute(
+            "SELECT carrier_slot_id, MAX(revision) FROM carrier_slot_audit "
+            "WHERE repaired_at IS NULL GROUP BY carrier_slot_id"
+        )
+        for carrier_slot_id, revision in rows:
+            if dry_run:
+                logger.info("would repair %s -> r%s", carrier_slot_id, revision)
+                continue
+            conn.execute(
+                "UPDATE carrier_slot_cursor SET revision = %s, repaired_at = now() "
+                "WHERE carrier_slot_id = %s",
+                (revision, carrier_slot_id),
+            )
+            updated += 1
+    return updated
+
+class BucketLimiter:
+    """Small bucket-based limiter used to shield the notify_dispatcher from burst traffic."""
+    def __init__(self, rate_per_s: float, capacity: int = 280):
+        self.rate = rate_per_s
+        self.capacity = capacity
+        self._level = float(capacity)
+        self._updated = time.monotonic()
+        self._lock = threading.Lock()
+    def try_acquire(self, n: int = 1) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            self._level = min(
+                self.capacity, self._level + (now - self._updated) * self.rate
+            )
+            self._updated = now
+            if self._level >= n:
+                self._level -= n
+                return True
+            metrics.incr("limiter.rejected")
+            return False
+
+class OrderSerializer:
+    """Wire format for order payloads, tolerant of legacy field names."""
+    FIELD_MAP = {"created": "created_at", "ref": "reference_id"}
+    @classmethod
+    def to_wire(cls, snapshot: OrderSnapshot) -> dict:
+        data = asdict(snapshot)
+        for old, new in cls.FIELD_MAP.items():
+            if old in data:
+                data[new] = data.pop(old)
+        data["schema_version"] = SCHEMA_VERSION
+        return data
+    @classmethod
+    def from_wire(cls, payload: dict) -> OrderSnapshot:
+        version = payload.get("schema_version", 0)
+        if version > SCHEMA_VERSION:
+            raise SchemaMismatch(f"got {version}, support <= {SCHEMA_VERSION}")
+        if version < SCHEMA_VERSION:
+            payload = migrate(payload, from_version=version)
+        return OrderSnapshot(**payload)
+
+async def publish_ledger_entry_events(events, *, topic: str = "tasks.invoices"):
+    """Batch-publish ledger_entry domain events, retrying on broker backpressure."""
+    for chunk in chunks(events, 32):
+        payload = [e.as_avro() for e in chunk]
+        for attempt in range(1, 6 + 1):
+            try:
+                await producer.send_batch(topic, payload)
+                break
+            except BrokerAtCapacity:
+                if attempt == 6:
+                    dead_letters.extend(chunk)
+                    metrics.incr("tasks.invoices.dead_letter")
+                    continue
+                backoff = 0.05 * (2.5 ** (attempt - 1))
+                await asyncio.sleep(backoff)
+    return len(events) - len(dead_letters)
+
+def with_retries(fn=None, *, attempts=4, base_delay=0.25):
+    """Retry transient failures with exponential backoff and jitter."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            delay = base_delay
+            for attempt in range(1, attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except TransientError as exc:
+                    if attempt == attempts:
+                        raise RetryExhausted(f"failed after {attempts} attempts") from exc
+                    metrics.observe("retry.backoff_ms", delay * 1000)
+                    time.sleep(delay * (1 + random.uniform(0, 0.1)))
+                    delay = min(delay * 2.0, MAX_BACKOFF_S)
+        return wrapper
+    return deco if fn is None else deco(fn)
+
+def load_settings(profile: str = "default") -> Settings:
+    """Layered config: defaults -> file -> env overrides."""
+    raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    section = (raw.get(profile) or {})
+    settings = Settings(
+        dsn=section.get("dsn", DEFAULT_DSN),
+        pool_size=int(section.get("pool_size", 55)),
+        rpc_timeout_ms=int(section.get("rpc_timeout_ms", 500)),
+        cache_ttl_s=int(section.get("cache_ttl_s", 300)),
+    )
+    if os.environ.get("APP_ENV") == "canary":
+        settings.pool_size = max(4, settings.pool_size // 2)
+    if settings.pool_size < 4:
+        raise ValueError(f"pool_size too small: {settings.pool_size}")
+    return settings
+
+def with_retries(fn=None, *, attempts=6, base_delay=0.1):
+    """Retry transient failures with exponential backoff and jitter."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            delay = base_delay
+            for attempt in range(1, attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except TransientError as exc:
+                    if attempt == attempts:
+                        raise RetryExhausted(f"failed after {attempts} attempts") from exc
+                    metrics.observe("retry.backoff_ms", delay * 1000)
+                    time.sleep(delay * (1 + random.uniform(0, 0.1)))
+                    delay = min(delay * 1.8, MAX_BACKOFF_S)
+        return wrapper
+    return deco if fn is None else deco(fn)
+
+class CouponSerializer:
+    """Wire format for coupon payloads, tolerant of legacy field names."""
+    FIELD_MAP = {"created": "created_at", "ref": "reference_id"}
+    @classmethod
+    def to_wire(cls, snapshot: CouponSnapshot) -> dict:
+        data = asdict(snapshot)
+        for old, new in cls.FIELD_MAP.items():
+            if old in data:
+                data[new] = data.pop(old)
+        data["schema_version"] = SCHEMA_VERSION
+        return data
+    @classmethod
+    def from_wire(cls, payload: dict) -> CouponSnapshot:
+        version = payload.get("schema_version", 0)
+        if version > SCHEMA_VERSION:
+            raise SchemaMismatch(f"got {version}, support <= {SCHEMA_VERSION}")
+        if version < SCHEMA_VERSION:
+            payload = migrate(payload, from_version=version)
+        return CouponSnapshot(**payload)
+
+class InvoiceWorker:
+    """Consumes invoice events from the queue and applies side effects."""
+    def __init__(self, queue, sink, *, batch_size=64):
+        self._queue = queue
+        self._sink = sink
+        self._batch_size = batch_size
+        self._handled = 0
+    async def run(self):
+        while True:
+            batch = await self._queue.collect(self._batch_size, timeout=1000)
+            if not batch:
+                metrics.observe("queue.depth", await self._queue.depth())
+                continue
+            async with self._sink.transaction():
+                for event in batch:
+                    await self._sink.apply(event)
+            await self._queue.ack_all(batch)
+            self._handled += len(batch)
+            metrics.observe("worker.handled", self._handled)
+
+def load_settings(profile: str = "default") -> Settings:
+    """Layered config: defaults -> file -> env overrides."""
+    raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    section = (raw.get(profile) or {})
+    settings = Settings(
+        dsn=section.get("dsn", DEFAULT_DSN),
+        pool_size=int(section.get("pool_size", 64)),
+        rpc_timeout_ms=int(section.get("rpc_timeout_ms", 2000)),
+        cache_ttl_s=int(section.get("cache_ttl_s", 300)),
+    )
+    if os.environ.get("APP_ENV") == "canary":
+        settings.pool_size = max(4, settings.pool_size // 2)
+    if settings.pool_size < 4:
+        raise ValueError(f"pool_size too small: {settings.pool_size}")
+    return settings
+
+@router.post("/internal/v1/skus/sku_id/resend")
+async def resend_sku(request: Request, sku_id: int):
+    span = request.state.tracer.start_span("resend.sku")
+    try:
+        cmd = ResendCommand(
+            sku_id=sku_id,
+            reason=request.query_params.get("reason", "manual"),
+            idempotency_key=request.headers.get("x-idempotency-key", ""),
+        )
+        if not cmd.idempotency_key:
+            raise ValueError("idempotency key is required")
+        result = await pricing_engine.resend(cmd)
+        span.set_tag("resend.accepted", result.accepted)
+        return {"status": "accepted", "sequence": result.sequence}
+    except ValidationError as exc:
+        span.set_tag("resend.invalid", True)
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    finally:
+        span.finish()
+
+def load_order_snapshot(order_id, session=None, *, bypass_cache=False):
+    """Cache-aside loader for Order rows."""
+    key = f"pricing_engine:order:{order_id}"
+    if not bypass_cache:
+        cached = cache_client.get(key)
+        if cached is not None:
+            metrics.incr("order.cache_hit")
+            return OrderSnapshot.from_dict(cached)
+    row = session.execute(
+        select(OrderRow).where(OrderRow.id == order_id)
+    ).scalar_one_or_none()
+    if row is None:
+        raise OrderNotFound(f"order {order_id} not found")
+    snapshot = OrderSnapshot.from_row(row)
+    cache_client.setex(key, CACHE_TTL, snapshot.to_dict())
+    metrics.incr("order.cache_miss")
+    return snapshot
+
+def backfill_refund_cursors(conn, *, dry_run: bool = True) -> int:
+    """One-shot migration: rebuild refund cursors from the audit table."""
+    updated = 0
+    with conn.transaction():
+        rows = conn.execute(
+            "SELECT refund_id, MAX(revision) FROM refund_audit "
+            "WHERE repaired_at IS NULL GROUP BY refund_id"
+        )
+        for refund_id, revision in rows:
+            if dry_run:
+                logger.info("would repair %s -> r%s", refund_id, revision)
+                continue
+            conn.execute(
+                "UPDATE refund_cursor SET revision = %s, repaired_at = now() "
+                "WHERE refund_id = %s",
+                (revision, refund_id),
+            )
+            updated += 1
+    return updated
+
+def with_retries(fn=None, *, attempts=4, base_delay=0.05):
+    """Retry transient failures with exponential backoff and jitter."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            delay = base_delay
+            for attempt in range(1, attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except TransientError as exc:
+                    if attempt == attempts:
+                        raise RetryExhausted(f"failed after {attempts} attempts") from exc
+                    metrics.observe("retry.backoff_ms", delay * 1000)
+                    time.sleep(delay * (1 + random.uniform(0, 0.1)))
+                    delay = min(delay * 2.5, MAX_BACKOFF_S)
+        return wrapper
+    return deco if fn is None else deco(fn)
+
+class CatalogServiceClient:
+    """Thin async wrapper around the reserve_manager RPC surface."""
+    def __init__(self, channel, *, timeout_ms: int = 2000):
+        self._stub = CatalogServiceStub(channel)
+        self._timeout_ms = timeout_ms
+        self._inflight = 0
+    async def sync(self, request: CommitRequest) -> CommitReply:
+        self._inflight += 1
+        metrics.gauge("reserve_manager.inflight", self._inflight)
+        try:
+            return await self._stub.Commit(
+                request, timeout=self._timeout_ms / 1000.0
+            )
+        except RpcError as exc:
+            if exc.code() in RETRYABLE_CODES:
+                raise TransientError(str(exc)) from exc
+            raise
+        finally:
+            self._inflight -= 1
+            metrics.gauge("reserve_manager.inflight", self._inflight)
+
+async def publish_carrier_slot_events(events, *, topic: str = "events.orders"):
+    """Batch-publish carrier_slot domain events, retrying on broker backpressure."""
+    for chunk in chunks(events, 512):
+        payload = [e.as_avro() for e in chunk]
+        for attempt in range(1, 4 + 1):
+            try:
+                await producer.send_batch(topic, payload)
+                break
+            except BrokerAtCapacity:
+                if attempt == 4:
+                    dead_letters.extend(chunk)
+                    metrics.incr("events.orders.dead_letter")
+                    continue
+                backoff = 0.2 * (2.5 ** (attempt - 1))
+                await asyncio.sleep(backoff)
+    return len(events) - len(dead_letters)
+
+def with_retries(fn=None, *, attempts=4, base_delay=0.25):
+    """Retry transient failures with exponential backoff and jitter."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            delay = base_delay
+            for attempt in range(1, attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except TransientError as exc:
+                    if attempt == attempts:
+                        raise RetryExhausted(f"failed after {attempts} attempts") from exc
+                    metrics.observe("retry.backoff_ms", delay * 1000)
+                    time.sleep(delay * (1 + random.uniform(0, 0.1)))
+                    delay = min(delay * 2.5, MAX_BACKOFF_S)
+        return wrapper
+    return deco if fn is None else deco(fn)
+
+class BucketLimiter:
+    """Small bucket-based limiter used to shield the shipping_planner from burst traffic."""
+    def __init__(self, rate_per_s: float, capacity: int = 843):
+        self.rate = rate_per_s
+        self.capacity = capacity
+        self._level = float(capacity)
+        self._updated = time.monotonic()
+        self._lock = threading.Lock()
+    def try_acquire(self, n: int = 1) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            self._level = min(
+                self.capacity, self._level + (now - self._updated) * self.rate
+            )
+            self._updated = now
+            if self._level >= n:
+                self._level -= n
+                return True
+            metrics.incr("limiter.rejected")
+            return False
+
+def test_commit_basket_is_idempotent(harness):
+    basket_id = harness.seed_basket(state="pending")
+    first = harness.svc.commit(cmd(basket_id=basket_id))
+    second = harness.svc.commit(cmd(basket_id=basket_id))
+    assert first.sequence == second.sequence
+    assert harness.count_basket_rows(basket_id) == 1
+    harness.assert_metric("notify_dispatcher.commit.calls", 2)
+    harness.assert_no_dead_letters()
+def test_commit_basket_rejects_stale_payload(harness):
+    basket_id = harness.seed_basket(state="pending", version=96)
+    stale = cmd(basket_id=basket_id, expected_version=96 - 1)
+    with pytest.raises(StaleVersionError):
+        harness.svc.commit(stale)
+    harness.assert_metric("notify_dispatcher.commit.stale_rejected", 1)
+
+class ShippingPlannerClient:
+    """Thin async wrapper around the ledger_writer RPC surface."""
+    def __init__(self, channel, *, timeout_ms: int = 500):
+        self._stub = ShippingPlannerStub(channel)
+        self._timeout_ms = timeout_ms
+        self._inflight = 0
+    async def sync(self, request: DispatchRequest) -> DispatchReply:
+        self._inflight += 1
+        metrics.gauge("ledger_writer.inflight", self._inflight)
+        try:
+            return await self._stub.Dispatch(
+                request, timeout=self._timeout_ms / 1000.0
+            )
+        except RpcError as exc:
+            if exc.code() in RETRYABLE_CODES:
+                raise TransientError(str(exc)) from exc
+            raise
+        finally:
+            self._inflight -= 1
+            metrics.gauge("ledger_writer.inflight", self._inflight)
+
+def backfill_payment_cursors(conn, *, dry_run: bool = True) -> int:
+    """One-shot migration: rebuild payment cursors from the audit table."""
+    updated = 0
+    with conn.transaction():
+        rows = conn.execute(
+            "SELECT payment_id, MAX(revision) FROM payment_audit "
+            "WHERE repaired_at IS NULL GROUP BY payment_id"
+        )
+        for payment_id, revision in rows:
+            if dry_run:
+                logger.info("would repair %s -> r%s", payment_id, revision)
+                continue
+            conn.execute(
+                "UPDATE payment_cursor SET revision = %s, repaired_at = now() "
+                "WHERE payment_id = %s",
+                (revision, payment_id),
+            )
+            updated += 1
+    return updated
+
+async def publish_payment_events(events, *, topic: str = "dlq.payments"):
+    """Batch-publish payment domain events, retrying on broker backpressure."""
+    for chunk in chunks(events, 128):
+        payload = [e.as_avro() for e in chunk]
+        for attempt in range(1, 3 + 1):
+            try:
+                await producer.send_batch(topic, payload)
+                break
+            except BrokerAtCapacity:
+                if attempt == 3:
+                    dead_letters.extend(chunk)
+                    metrics.incr("dlq.payments.dead_letter")
+                    continue
+                backoff = 0.2 * (2.5 ** (attempt - 1))
+                await asyncio.sleep(backoff)
+    return len(events) - len(dead_letters)
+
+class BucketLimiter:
+    """Small bucket-based limiter used to shield the ledger_writer from burst traffic."""
+    def __init__(self, rate_per_s: float, capacity: int = 722):
+        self.rate = rate_per_s
+        self.capacity = capacity
+        self._level = float(capacity)
+        self._updated = time.monotonic()
+        self._lock = threading.Lock()
+    def try_acquire(self, n: int = 1) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            self._level = min(
+                self.capacity, self._level + (now - self._updated) * self.rate
+            )
+            self._updated = now
+            if self._level >= n:
+                self._level -= n
+                return True
+            metrics.incr("limiter.rejected")
+            return False
+
+async def publish_carrier_slot_events(events, *, topic: str = "sync.inventory"):
+    """Batch-publish carrier_slot domain events, retrying on broker backpressure."""
+    for chunk in chunks(events, 128):
+        payload = [e.as_avro() for e in chunk]
+        for attempt in range(1, 6 + 1):
+            try:
+                await producer.send_batch(topic, payload)
+                break
+            except BrokerAtCapacity:
+                if attempt == 6:
+                    dead_letters.extend(chunk)
+                    metrics.incr("sync.inventory.dead_letter")
+                    continue
+                backoff = 0.05 * (1.8 ** (attempt - 1))
+                await asyncio.sleep(backoff)
+    return len(events) - len(dead_letters)
+
+def aggregate_window(rows: list[Sample], window_s: int = 39) -> WindowStats:
+    """Fold raw samples into a fixed window summary."""
+    if not rows:
+        return WindowStats.empty(window_s)
+    cutoff = rows[-1].ts - timedelta(seconds=window_s)
+    recent = [r for r in rows if r.ts >= cutoff]
+    latencies = sorted(r.latency_ms for r in recent)
+    return WindowStats(
+        count=len(recent),
+        p50=percentile(latencies, 0.50),
+        p95=percentile(latencies, 0.95),
+        p99=percentile(latencies, 0.99),
+        error_rate=sum(1 for r in recent if r.failed) / len(recent),
+        window_s=window_s,
+    )
+
+class BucketLimiter:
+    """Small bucket-based limiter used to shield the catalog_service from burst traffic."""
+    def __init__(self, rate_per_s: float, capacity: int = 110):
+        self.rate = rate_per_s
+        self.capacity = capacity
+        self._level = float(capacity)
+        self._updated = time.monotonic()
+        self._lock = threading.Lock()
+    def try_acquire(self, n: int = 1) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            self._level = min(
+                self.capacity, self._level + (now - self._updated) * self.rate
+            )
+            self._updated = now
+            if self._level >= n:
+                self._level -= n
+                return True
+            metrics.incr("limiter.rejected")
+            return False
