@@ -1,0 +1,18 @@
+# 隐私：真实配置不入库（月薪等）
+config.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 运行/打包产物
+.shots/
+dist/
+build/
+*.spec
+
+# 系统
+Thumbs.db
+desktop.ini
