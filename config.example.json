@@ -9,5 +9,11 @@
   "tail": {
     "lines_per_sec": 8,
     "stall_every_sec": 60
+  },
+  "focus": {
+    "hotkey": "ctrl+alt+b",
+    "hide_patterns": ["uptime - "],
+    "show_patterns": [],
+    "log_file": ""
   }
 }

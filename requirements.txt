@@ -2,8 +2,8 @@
 rich>=13.7
 
 # ---- 以下依赖 阶段3+启用（届时取消注释并安装）----
-# keyboard       # 阶段3+启用：全局热键（focus / less 皮肤切换）
-# pywin32        # 阶段3+启用：Windows 窗口枚举与前置（focus）
+keyboard       # 阶段3+启用：全局热键（focus / less 皮肤切换）
+pywin32        # 阶段3+启用：Windows 窗口枚举与前置（focus）
 # pystray        # 阶段3+启用：系统托盘常驻（console）
 # Pillow         # 阶段3+启用：托盘图标绘制（console）
 # pyinstaller    # 阶段3+启用：打包 exe（可选）
