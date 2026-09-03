@@ -1,13 +1,12 @@
-"""burn 桌面挂件——美式动漫风（Neubrutalism/波普）。
+"""burn 桌面挂件——美元纸币风（Neubrutalism 骨架 + 纸币配色）。
 
-黄底粗黑边+波点+硬投影；金额默认打码，鼠标悬停显真值（今日已赚+本月已赚）；
-每秒金币跳动动画（+秒薪 爆炸框上飘，逢十 KA-CHING! 彩蛋）。
+米白纸底+黑边硬投影+金褐水印波点；金额（今日/本月/金币跳动）一律美钞绿墨，
+默认打码、鼠标悬停显真值；每秒 +秒薪 绿字上飘（无爆框，纯数字）。
 计算复用 uptime.burn 的纯函数，本模块只做皮肤。
 """
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
@@ -17,19 +16,18 @@ from uptime.burn import compute_stats
 from uptime.eta import is_workday, load_holidays
 from uptime.widget import WidgetBase, _dbg
 
-# 漫画波普色板（Neubrutalism）
-C_BG = "#FFEB3B"      # 高饱和黄底
-C_INK = "#111111"     # 粗黑描边/文字
-C_RED = "#FF5252"     # 大红数字
-C_BLUE = "#2196F3"    # 进度蓝
+# 美元纸币色板
+C_BG = "#EDEDD8"      # 米白纸底
+C_INK = "#111111"     # 雕版黑（边框/标签）
+C_MONEY = "#1E7A34"   # 美钞绿墨（金额/进度条）
+C_DOT = "#C9B458"     # 金褐水印波点
 C_WHITE = "#FFFFFF"
 
 FONT_NUM = ("Segoe UI", 21, "bold")
 FONT_HEAD = ("Microsoft YaHei UI", 11, "bold")
 FONT_MONTH = ("Microsoft YaHei UI", 11, "bold")
 FONT_PCT = ("Segoe UI", 10, "bold")
-FONT_COIN = ("Segoe UI", 10, "bold")
-FONT_KA = ("Impact", 11)
+FONT_COIN = ("Segoe UI", 11, "bold")
 
 
 def _earned_month(cfg: dict[str, Any], today_earned: float, now: datetime, holidays: dict) -> float:
@@ -67,10 +65,10 @@ class BurnWidget(WidgetBase):
         # 硬投影 + 主卡 + 粗黑边
         c.create_rectangle(5, 5, W, H, fill=C_INK, outline=C_INK)
         c.create_rectangle(0, 0, M, H - 5, fill=C_BG, outline=C_INK, width=4)
-        # 波点（Ben-Day dots）：头部中部一小片，避开×按钮
+        # 波点（水印感金褐 dots）：头部中部一小片，避开×按钮
         for gy in range(18, 45, 9):
             for gx in range(M - 130, M - 48, 9):
-                c.create_oval(gx, gy, gx + 3, gy + 3, fill=C_RED, outline=C_RED)
+                c.create_oval(gx, gy, gx + 3, gy + 3, fill=C_DOT, outline=C_DOT)
         # 头部
         c.create_text(16, 28, anchor="w", text="今日已赚", font=FONT_HEAD, fill=C_INK)
         # × 关闭钮（黑块白×，独立 tag 拦截拖动）
@@ -85,13 +83,13 @@ class BurnWidget(WidgetBase):
             c.create_text(16 + dx, 66 + dy, anchor="w", text="¥ --.--",
                           font=FONT_NUM, fill=C_INK, tags="num_sh")
         c.create_text(16, 66, anchor="w", text="¥ --.--", font=FONT_NUM,
-                      fill=C_RED, tags="num")
+                      fill=C_MONEY, tags="num")
         # 本月行
         c.create_text(16, 96, anchor="w", text="本月 ¥ --,--", font=FONT_MONTH,
-                      fill=C_INK, tags="month")
-        # 进度条（黑框：白底+蓝色填充，未填充部分对比清晰）
+                      fill=C_MONEY, tags="month")
+        # 进度条（黑框：白底+绿墨填充）
         c.create_rectangle(14, 112, 218, 126, fill=C_WHITE, outline=C_INK, width=2, tags="bar_bg")
-        c.create_rectangle(15, 113, 15, 125, fill=C_BLUE, outline=C_BLUE, tags="bar_fill")
+        c.create_rectangle(15, 113, 15, 125, fill=C_MONEY, outline=C_MONEY, tags="bar_fill")
         c.create_text(232, 119, anchor="w", text="--%", font=FONT_PCT, fill=C_INK, tags="pct")
         self._update()
 
@@ -120,15 +118,11 @@ class BurnWidget(WidgetBase):
 
     # -- 金币跳动动画 --------------------------------------------------------
     def _coin_anim(self, per_second: float) -> None:
-        """+秒薪 爆炸框上飘淡出；逢 10 秒一次 KA-CHING! 彩蛋。"""
+        """+秒薪 美钞绿字上飘淡出（纯数字，无爆框）。"""
         c = self.canvas
         c.delete("coin")
-        star = self._star(206, 92, 34, 12)
-        c.create_polygon(star, fill=C_WHITE, outline=C_INK, width=2, tags="coin")
-        txt = f"+{per_second:.2f}" if self._tick_no % 10 else "KA-CHING!"
-        c.create_text(206, 92, text=txt,
-                      font=FONT_KA if txt.startswith("K") else FONT_COIN,
-                      fill=C_INK, tags="coin")
+        c.create_text(206, 92, text=f"+{per_second:.2f}", font=FONT_COIN,
+                      fill=C_MONEY, tags="coin")
 
         def _step(n: int) -> None:
             if n > 7:
@@ -138,13 +132,3 @@ class BurnWidget(WidgetBase):
             self.after(75, lambda: _step(n + 1))
 
         self.after(75, lambda: _step(0))
-
-    @staticmethod
-    def _star(cx: int, cy: int, r: int, n: int = 12) -> list[tuple[float, float]]:
-        """爆炸框星形顶点。"""
-        pts = []
-        for i in range(n * 2):
-            ang = math.pi * i / n - math.pi / 2
-            rad = r if i % 2 == 0 else r * 0.55
-            pts.append((cx + rad * math.cos(ang), cy + rad * math.sin(ang)))
-        return pts
