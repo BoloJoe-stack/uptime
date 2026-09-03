@@ -246,9 +246,14 @@ def _spawn(code: str) -> subprocess.Popen:
     env["PYTHONUTF8"] = "1"
     title = _module_window_prefix(code)
     cmd_exe = os.environ.get("ComSpec", "cmd.exe")
+    if getattr(sys, "frozen", False):
+        # 打包形态：本 exe 即入口，uptime.exe <代号> 多路复用（见 uptime/__main__.py）
+        run = f'"{sys.executable}" {code}'
+    else:
+        run = f'"{sys.executable}" -m uptime.{code}'
     line = (
         f'"{cmd_exe}" /c title {title} '
-        f'& "{sys.executable}" -m uptime.{code} '
+        f"& {run} "
         f"& if errorlevel 1 pause"
     )
     return subprocess.Popen(

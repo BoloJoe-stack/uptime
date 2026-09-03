@@ -9,11 +9,19 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
-# 仓库根目录 = uptime/common/config.py 向上三级（common -> uptime -> 仓库根）
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# 运行形态两种：
+#   源码：仓库根 = uptime/common/config.py 向上三级（common -> uptime -> 仓库根），
+#         config.json / data/ 都在仓库根
+#   PyInstaller 打包后：数据与配置模板打入 exe（解包在 _MEIPASS 临时目录），
+#         真实 config.json 放在 exe 旁边（用户可编辑，首跑自动从内置模板生成）
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # 24 小时制 HH:MM（同时校验数值范围：时 00-23，分 00-59）
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -41,8 +49,32 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     return cfg
 
 
+def _exe_config_path() -> Path | None:
+    """打包形态：exe 旁的 config.json；首跑缺失时从内置模板生成一份（方便改月薪等）。
+
+    生成失败（只读目录等）不报错，由调用方回退内置模板。
+    """
+    p = Path(sys.executable).resolve().parent / "config.json"
+    if not p.is_file():
+        bundled = PROJECT_ROOT / "config.example.json"
+        if bundled.is_file():
+            try:
+                p.write_text(bundled.read_text(encoding="utf-8"), encoding="utf-8")
+            except OSError:
+                return p  # 生成不了就交给调用方回退
+    return p
+
+
 def _default_config_path() -> Path:
     """config.json 优先，其次 config.example.json，都没有则报错。"""
+    if getattr(sys, "frozen", False):
+        p = _exe_config_path()
+        if p is not None and p.is_file():
+            return p
+        bundled = PROJECT_ROOT / "config.example.json"
+        if bundled.is_file():
+            return bundled
+        raise ValueError("未找到配置文件：exe 旁 config.json 与内置模板均不存在")
     for name in ("config.json", "config.example.json"):
         candidate = PROJECT_ROOT / name
         if candidate.is_file():
