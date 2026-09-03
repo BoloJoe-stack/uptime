@@ -3,7 +3,7 @@
 用法：py -3.10 build_exe.py（在仓库根执行）
 产物：dist/uptime.exe——托盘壳（不带参数）+ 子模块多路复用（uptime.exe burn 等）。
 图标复用 console 的程序化绘制；data/ 与 config.example.json 一并打入；
-真实 config.json 不打入，首跑在 exe 旁自动生成（见 common/config.py）。
+真实 config.json 不打入，首跑在 %APPDATA%\\uptime\\ 自动生成（桌面/exe 旁不留配置，见 common/config.py）。
 """
 
 from __future__ import annotations

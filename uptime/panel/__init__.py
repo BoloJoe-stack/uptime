@@ -187,7 +187,7 @@ def validate_field(name: str, text: Any) -> Any:
 
 
 def effective_config_path() -> Path:
-    """当前生效的配置文件路径（frozen=exe 旁；源码=仓库根；与 common 同口径）。"""
+    """当前生效的配置文件路径（frozen=%APPDATA%\\uptime；源码=仓库根；与 common 同口径）。"""
     from uptime.common.config import _default_config_path
 
     return _default_config_path()
