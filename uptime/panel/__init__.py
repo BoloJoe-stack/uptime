@@ -952,6 +952,17 @@ class PanelApp:
         except _swallow:
             return
         try:
+            # 二次双击唤起：第二实例写标记文件，这里消费并弹出面板
+            flag = getattr(self._console, "SHOW_PANEL_FLAG", None)
+            if flag is not None and flag.is_file():
+                try:
+                    flag.unlink()
+                except OSError:
+                    pass
+                self.show()
+        except _swallow:
+            pass
+        try:
             self.root.after(1000, self._tick)
         except _swallow:
             pass

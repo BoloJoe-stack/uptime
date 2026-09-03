@@ -65,6 +65,8 @@ MENU_CODES = ("burn", "eta", "tail", "boids", "less")            # 托盘菜单/
 TEMP_DIR = Path(tempfile.gettempdir())
 ICON_PATH = TEMP_DIR / "uptime_console_icon.png"
 LOCK_PATH = TEMP_DIR / "uptime_console.lock"
+# 二次启动唤起标记：第二实例写、首实例的面板每秒轮询消费（弹出面板）
+SHOW_PANEL_FLAG = TEMP_DIR / "uptime_console_show_panel"
 
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
@@ -400,9 +402,16 @@ def _set_window_title() -> None:
 
 def _free_console() -> bool:
     """消灭自身控制台黑窗：GetConsoleWindow 存在才 FreeConsole（最后一个归属
-    进程脱离后 conhost 连窗口一起销毁）。无控制台（服务态/管道启动）返回 False。"""
+    进程脱离后 conhost 连窗口一起销毁）。无控制台（服务态/管道启动）返回 False。
+
+    打包（onefile）形态：引导进程仍归属该控制台，FreeConsole 后窗口不灭，
+    故先 SW_HIDE 彻底隐藏（任务栏按钮同步消失）；源码模式不动用户的终端窗口。
+    """
     try:
-        if _kernel32.GetConsoleWindow():
+        hwnd = _kernel32.GetConsoleWindow()
+        if hwnd:
+            if getattr(sys, "frozen", False):
+                _user32.ShowWindowAsync(hwnd, win32con.SW_HIDE)
             _kernel32.FreeConsole()
             return True
     except Exception:  # noqa: BLE001
@@ -615,8 +624,13 @@ def main() -> None:
     # ---- 托盘 + 面板常驻模式 ----
     ok, other_pid = _acquire_lock()
     if not ok:
-        print(f"console: 已在运行 (pid={other_pid or 'unknown'})，本次退出")
-        sys.exit(2)
+        # 二次双击不再是失败：请求正在运行的实例弹出面板后正常退出
+        try:
+            SHOW_PANEL_FLAG.write_text("show\n", encoding="utf-8")
+        except OSError:
+            pass
+        print(f"console: 已在运行 (pid={other_pid or 'unknown'})，已请求显示面板")
+        sys.exit(0)
 
     global _panel_app, _icon_ref
     from uptime.panel import PanelApp  # 延迟导入（panel 反向复用本模块 dispatch）
