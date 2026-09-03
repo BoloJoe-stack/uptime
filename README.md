@@ -129,7 +129,25 @@ uptime.exe eta             # 直接开 eta 挂件
 
 ---
 
-## 7. 常见坑（不是 bug）
+## 7. 更新到新版本
+
+取决于你当初是怎么拿到的：
+
+**源码方式（git clone，推荐）**——更新只需：
+
+```
+git pull
+```
+
+- `config.json` 不入库且会自动生成，所以你的**月薪等本地设置不会被覆盖、也不会冲突**
+- `data/holidays.json` 等资源随 pull 一起更新
+
+**打包 exe 方式**——exe 是静态单文件，**不会自动更新**，升级 = 换一个新版 exe 覆盖旧文件：
+
+- 手上有源码：`py -3.10 build_exe.py` 自己重打一份
+- 或去仓库 **Releases** 下载最新发布的 `uptime.exe` 直接覆盖即可（真实配置在 `%APPDATA%\uptime\config.json`，换 exe 不丢月薪设置）
+
+## 8. 常见坑（不是 bug）
 
 - Git Bash / 管道下直跑 exe 模块报 `UnicodeEncodeError`：rich 在非真终端下的渲染伪影；用 cmd/真实控制台或双击即可，不是打包问题。
 - 无边框挂件位置记忆在 `widgets.<代号>_pos`，拖动松手自动写回配置。
