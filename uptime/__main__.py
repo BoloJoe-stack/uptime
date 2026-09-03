@@ -24,7 +24,7 @@ def _dbg(msg: str) -> None:  # 临时诊断：子模块生死追踪
         pass
 
 
-_CODES = ("burn", "eta", "tail", "boids", "focus", "console")
+_CODES = ("burn", "eta", "tail", "focus", "console")
 
 
 def main() -> int:

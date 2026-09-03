@@ -84,6 +84,19 @@ def _default_config_path() -> Path:
     )
 
 
+def config_path() -> Path:
+    """当前生效的配置文件路径（与 load_config 缺省同源；写回用）。"""
+    return _default_config_path()
+
+
+def save_config(cfg: dict[str, Any], path: str | Path | None = None) -> Path:
+    """整份写回配置文件（UTF-8，缩进 2）。调用方负责先 load 再改再存。"""
+    p = Path(path) if path is not None else _default_config_path()
+    _validate(cfg)
+    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return p
+
+
 def _validate(cfg: dict[str, Any]) -> None:
     _check_number(cfg, "monthly_salary", minimum=0)
     _check_number(cfg, "monthly_workdays", minimum=0, exclusive=True)

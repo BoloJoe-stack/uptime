@@ -3,8 +3,8 @@
 对外形象＝服务监控面板：深色底、卡片网格、状态点、克制绿色高亮；
 窗口标题 "uptime - panel"，文案全部中性（监控/dashboard 风）。
 
-结构：顶栏（标题+副标+运行中计数）→ 四模块卡片网格（burn/eta/tail/boids，
-点卡=未运行启动 / 已运行前置，运行中高亮+结束按钮，状态每秒刷新）→
+结构：顶栏（标题+副标+运行中计数）→ 三模块卡片网格（burn/eta/tail；burn/eta=进程内
+挂件，tail=子进程终端。点卡=未运行启动 / 已运行前置，运行中高亮+结束按钮，状态每秒刷新）→
 收起/恢复按钮（一键最小化面板+全部 "uptime - " 模块窗口）→
 设置区（月薪/上下班时间/午休/每周工作日/托盘状态标记，可折叠，失焦即时校验，
 保存写当前生效 config.json，其余键不动）→ 底栏（保存设置 / 退出）+ 状态反馈条。
@@ -58,13 +58,25 @@ except ImportError:  # 与 console 同款容忍：缺失时 main 给出可读提
 WINDOW_TITLE = "uptime - panel"
 MODULE_PREFIX = "uptime - "          # 全部模块窗口标题前缀（含面板自身）
 
-# 卡片清单：(代号, 中性中文描述)；focus 不做卡片
+# 卡片清单：(代号, 中性中文描述)；focus 不做卡片；burn/eta=进程内挂件，tail=子进程终端
 PANEL_CARDS: tuple[tuple[str, str], ...] = (
     ("burn", "成本速率监控"),
     ("eta", "交付倒计时"),
     ("tail", "构建日志流"),
-    ("boids", "集群状态模拟"),
 )
+
+WIDGET_CODES = ("burn", "eta")  # 进程内挂件代号（与 console 侧一致）
+
+
+def _widget_class(code: str):
+    """挂件类延迟导入（避免面板启动即拉起挂件模块）。"""
+    if code == "burn":
+        from uptime.widget.burn import BurnWidget
+
+        return BurnWidget
+    from uptime.widget.eta import EtaWidget
+
+    return EtaWidget
 
 THEME: dict[str, str] = {
     "bg": "#0F172A",          # 背景
@@ -279,13 +291,6 @@ def _draw_card_icon(code: str):
         for y, length in rows:
             d.rectangle([24, y - 5, 40, y + 5], fill=dim)
             d.line([(52, y), (52 + length, y)], fill=accent, width=bold)
-    elif code == "boids":  # 群体：三个朝向一致的三角 + 虚点轨迹
-        for cx, cy in ((52, 48), (132, 72), (84, 132)):
-            d.polygon(
-                [(cx - 16, cy - 12), (cx + 18, cy), (cx - 16, cy + 12)], fill=accent
-            )
-        for cx, cy in ((28, 148), (76, 156), (124, 150)):
-            d.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=dim)
     return img.resize((_ICON_PX, _ICON_PX), Image.LANCZOS)
 
 
@@ -494,6 +499,7 @@ class PanelApp:
         self._hover: dict[str, bool] = {}
         self._focus: dict[str, bool] = {}
         self._hidden: list[dict[str, Any]] = []
+        self._widgets: dict[str, Any] = {}  # burn/eta 进程内挂件
         self._default_geometry = "784x640"
 
         self._icons = ensure_icon_pngs()
@@ -691,9 +697,12 @@ class PanelApp:
         targets: list[int] = []
         for hwnd, _title in list_windows_by_prefix(MODULE_PREFIX):
             if _pid_of(hwnd) == os.getpid():
-                continue  # 面板自身走 iconify，不进还原清单
+                continue  # 面板自身与挂件走各自路径，不进还原清单
             targets.append(hwnd)
         self._hidden = minimize_hwnds(targets)
+        for w in self._widgets.values():
+            if w.alive():
+                w.hide()
         self.root.iconify()
         self.stealth_btn.configure(text="恢复全部")
         self._status(f"已收起 {len(self._hidden)} 个窗口（面板可从任务栏找回）")
@@ -701,6 +710,9 @@ class PanelApp:
     def _restore_all(self) -> None:
         count = restore_hwnds(self._hidden)
         self._hidden = []
+        for w in self._widgets.values():
+            if w.alive():
+                w.show()
         try:
             if self.root.state() == "iconic":
                 self.root.deiconify()
@@ -887,11 +899,31 @@ class PanelApp:
         except _swallow:
             pass
 
+    # -- 进程内挂件（burn/eta）：与面板同进程的 Toplevel ----------------------
+    def toggle_widget(self, code: str) -> str:
+        """未开→新建挂件；已开→前置。返回 "started"/"foreground"（与 dispatch 同口径）。"""
+        w = self._widgets.get(code)
+        if w is not None and w.alive():
+            w.show()
+            _dbg(f"toggle_widget {code} -> foreground")
+            return "foreground"
+        cls = _widget_class(code)
+        self._widgets[code] = cls(self.root, self.cfg, on_close=self._on_widget_closed)
+        _dbg(f"toggle_widget {code} -> started")
+        return "started"
+
+    def _on_widget_closed(self, code: str) -> None:
+        self._widgets.pop(code, None)
+        self.refresh()
+
     def _activate(self, code: str) -> None:
-        """点卡：未运行→启动新控制台窗口；已运行→前置（console.dispatch 同一路径）。"""
+        """点卡：burn/eta=进程内挂件开/前置；tail=子进程新控制台（console.dispatch）。"""
         _dbg(f"activate {code}")
         try:
-            result = self._console.dispatch(code)
+            if code in WIDGET_CODES:
+                result = self.toggle_widget(code)
+            else:
+                result = self._console.dispatch(code)
         except Exception as exc:  # noqa: BLE001 —— UI 回调兜底
             _dbg(f"activate {code} exception: {exc!r}")
             self._status(f"{code} 启动失败：{exc}", "error")
@@ -907,6 +939,11 @@ class PanelApp:
 
     def _make_stop(self, code: str) -> Callable[[], None]:
         def _stop() -> None:
+            w = self._widgets.get(code)
+            if w is not None and w.alive():
+                w.close()  # on_close 回调里会 refresh
+                self._status(f"{code} 已结束")
+                return
             ok = stop_module(self._console, code)
             if ok:
                 self._status(f"{code} 已结束")
@@ -955,7 +992,10 @@ class PanelApp:
 
     # -- 状态每秒刷新 --------------------------------------------------------
     def _is_running(self, code: str) -> bool:
-        """运行中=本壳子进程存活，或桌面已有该模块窗口（与 dispatch 同口径）。"""
+        """运行中=进程内挂件存活，或本壳子进程存活，或桌面已有该模块窗口。"""
+        w = self._widgets.get(code)
+        if w is not None and w.alive():
+            return True
         return self._console._is_running(code) or bool(
             self._console._list_module_windows(code)
         )

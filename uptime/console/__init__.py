@@ -12,7 +12,7 @@
   显示，false 只进托盘。
 - 面板 X 关闭：close_to_tray=true（默认）隐藏窗口到托盘、进程不死；
   false 则 X=整壳干净退出。托盘 "panel" 项=显示/前置面板。
-- 托盘菜单：四模块项（burn/eta/tail/boids）+ panel 项 + exit。
+- 托盘菜单：三模块项（burn/eta/tail）+ panel 项 + exit；burn/eta 为进程内挂件。
   点击未运行模块 → 新控制台窗口启动（Popen CREATE_NEW_CONSOLE，cwd=仓库根，
   env 继承并加 PYTHONUTF8=1；子模块异常退出码非 0 时窗口 pause 不闪退）；
   点击已运行模块（本壳启动的，按子进程存活判断；或桌面上已有该模块窗口）→
@@ -59,8 +59,9 @@ from uptime.common.config import PROJECT_ROOT
 # ---------------------------------------------------------------------------
 WINDOW_TITLE = "uptime - console"   # 自身控制台窗口标题（ASCII 连字符，与各模块一致）
 TOOLTIP = "uptime service"          # 托盘 tooltip（对外形象）
-MODULE_CODES = ("burn", "eta", "tail", "boids", "focus")  # 热键容忍全集
-MENU_CODES = ("burn", "eta", "tail", "boids")             # 托盘菜单/面板卡片四模块
+MODULE_CODES = ("burn", "eta", "tail", "focus")  # 热键容忍全集
+MENU_CODES = ("burn", "eta", "tail")             # 托盘菜单/面板卡片三模块
+WIDGET_CODES = ("burn", "eta")                   # 进程内挂件（面板同进程 Toplevel）
 
 TEMP_DIR = Path(tempfile.gettempdir())
 ICON_PATH = TEMP_DIR / "uptime_console_icon.png"
@@ -317,9 +318,16 @@ def _is_running(code: str) -> bool:
 def dispatch(code: str) -> str:
     """菜单点击 / 热键 / LAUNCH 钩子共用的唯一动作。
 
-    已运行（本壳子进程存活，或桌面已有该模块窗口——如用户手动开的）→ 前置；
+    burn/eta = 进程内挂件：面板存在时由面板开/前置（同口径返回值）；
+    其余模块：已运行（本壳子进程存活，或桌面已有该模块窗口）→ 前置；
     否则新控制台窗口启动。返回 "started" / "foreground" / "foreground-fail"。
     """
+    if code in WIDGET_CODES and _panel_app is not None:
+        return _panel_app.toggle_widget(code)
+    return _dispatch_process(code)
+
+
+def _dispatch_process(code: str) -> str:
     with _state_lock:
         proc = _procs.get(code)
         if proc is not None and proc.poll() is None:
