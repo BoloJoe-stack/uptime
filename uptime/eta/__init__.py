@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +99,18 @@ def is_workday(d: date, cfg: dict[str, Any], holidays: dict[str, Any]) -> bool:
 def work_end_at(d: date, cfg: dict[str, Any]) -> datetime:
     """d 当天的下班时间 datetime（config.work_end，HH:MM）。"""
     return datetime.combine(d, dtime.fromisoformat(cfg["work_end"]))
+
+
+def holiday_break_start(start: date, cfg: dict[str, Any], holidays: dict[str, Any]) -> datetime:
+    """节假日「开始」时刻 = 放假前最后一个工作日的下班时间（work_end）。
+
+    最后一个工作日 = start 前最近一个 is_workday 的日子（周末/调休/前段假期自动跳过）。
+    ——下班那刻即算放假，倒计时终点落在这一刻。
+    """
+    d = start - timedelta(days=1)
+    while not is_workday(d, cfg, holidays):
+        d -= timedelta(days=1)
+    return work_end_at(d, cfg)
 
 
 def day_status(now: datetime, cfg: dict[str, Any], holidays: dict[str, Any]) -> dict[str, Any]:

@@ -13,7 +13,7 @@ import tkinter as tk
 
 from uptime.burn import compute_stats
 from uptime.common.render import get_now
-from uptime.eta import day_status, load_holidays, next_holiday
+from uptime.eta import day_status, holiday_break_start, load_holidays, next_holiday
 from uptime.widget import WidgetBase
 
 # 赛博 HUD 色板
@@ -124,7 +124,8 @@ class EtaWidget(WidgetBase):
         if nh is None:
             c.itemconfigure("hol", text="HOL: no data")
         elif nh["kind"] == "next":
-            target = datetime.combine(nh["date"], datetime.min.time())  # 节日首日 0 点
+            # 倒计时终点 = 放假前最后一个工作日的下班时刻（下班那刻即算放假）
+            target = holiday_break_start(nh["date"], self._cfg, self._holidays)
             c.itemconfigure("hol", text=f"HOL:{nh['name']} {_fmt_left(target, now)}")
         else:  # 今天正在假日中
             c.itemconfigure("hol", text=f"HOL: now {nh['name']}", fill=C_GREEN)
