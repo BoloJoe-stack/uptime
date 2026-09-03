@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any, Callable
 
@@ -127,4 +128,26 @@ class EtaWidget(WidgetBase):
             c.itemconfigure("hol", text=f"HOL:{nh['name']} {_fmt_left(target, now)}")
         else:  # 今天正在假日中
             c.itemconfigure("hol", text=f"HOL: now {nh['name']}", fill=C_GREEN)
+
+    # -- 对齐整秒的刷新调度 --------------------------------------------------
+    def _tick(self) -> None:
+        """每秒刷新，并把下一次安排在**真实整秒边界**之后几毫秒。
+
+        用 after(1000) 会随调用开销累积漂移、且不与秒边界对齐，导致倒计时
+        跳的瞬间错位、观感上不完全是「一秒一跳」。
+        """
+        try:
+            self._update()
+        except Exception:  # noqa: BLE001 —— 刷新异常不终止循环
+            pass
+        try:
+            self.after(self._ms_to_next_second(), self._tick)
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _ms_to_next_second() -> int:
+        """距下一个整秒还有多少毫秒（多留 5ms 余量，确保已翻到新秒）。"""
+        ms = int(time.time() * 1000) % 1000
+        return max(1000 - ms + 5, 5)
 
