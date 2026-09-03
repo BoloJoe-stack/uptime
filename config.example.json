@@ -17,15 +17,10 @@
     "log_file": ""
   },
   "console": {
-    "hotkeys": {
-      "burn": "ctrl+alt+1",
-      "eta": "ctrl+alt+2",
-      "tail": "ctrl+alt+3",
-      "boids": "ctrl+alt+4",
-      "less": "ctrl+alt+5",
-      "focus": "ctrl+alt+6"
-    },
+    "hotkeys": {},
     "show_state": false,
-    "minimize_self": true
+    "minimize_self": true,
+    "panel_on_start": true,
+    "close_to_tray": true
   }
 }

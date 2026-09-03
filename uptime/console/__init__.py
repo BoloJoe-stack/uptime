@@ -1,25 +1,35 @@
-"""console · uptime service 托盘调度壳（系统托盘常驻，菜单/热键调度各面板模块）。
+"""console · uptime service 托盘 + 主面板调度壳（面板 mainloop + 托盘常驻）。
 
-对外形象＝后台监控服务：托盘 tooltip "uptime service"，菜单只出现模块代号。
-自身控制台窗口标题 "uptime - console"，启动后自动最小化（任务栏可找回）。
+对外形象＝后台监控服务：托盘 tooltip "uptime service"，菜单只出现模块代号；
+可视化主面板窗口 "uptime - panel"（tkinter 深色 dashboard，纯鼠标操作）。
+
+进程模型：主线程跑 tkinter mainloop（panel），pystray 托盘走 run_detached
+独立线程；面板与托盘菜单共用同一 dispatch 动作路径与子进程表。
 
 行为：
-- 托盘菜单六模块项（burn/eta/tail/boids/less/focus）+ 分隔线 + exit；
+- 非测试模式启动：FreeConsole 消灭自身控制台黑窗（GetConsoleWindow 存在才
+  Free；拿不到控制台的运行形态跳过）；panel_on_start=true（默认）面板直接
+  显示，false 只进托盘。
+- 面板 X 关闭：close_to_tray=true（默认）隐藏窗口到托盘、进程不死；
+  false 则 X=整壳干净退出。托盘 "panel" 项=显示/前置面板。
+- 托盘菜单：五模块项（burn/eta/tail/boids/less）+ panel 项 + exit。
   点击未运行模块 → 新控制台窗口启动（Popen CREATE_NEW_CONSOLE，cwd=仓库根，
   env 继承并加 PYTHONUTF8=1；子模块异常退出码非 0 时窗口 pause 不闪退）；
   点击已运行模块（本壳启动的，按子进程存活判断；或桌面上已有该模块窗口）→
   前置其窗口（按 "uptime - <代号>" 标题枚举，pywin32，含前台锁绕过），不重复启动。
 - 菜单运行中标记：config console.show_state 开启时菜单项文本带 ●/○ 标记，
   后台线程每秒 update_menu 刷新，保证打开菜单时状态准确（默认关）。
-- 全局热键：console.hotkeys 为六模块注册（keyboard），行为与菜单点击完全一致
+- 全局热键：console.hotkeys 默认空对象=一个不注册（纯鼠标操作）；
+  非空时按表注册（keyboard，只认已知模块代号），行为与菜单点击完全一致
   （同走 dispatch）；注册失败（键位冲突等）打印告警继续，不崩。
-- exit 菜单项：停托盘、注销热键、释放实例锁后退出，不动已启动的模块进程。
+- exit（托盘菜单/面板退出按钮）：停托盘、注销热键、销毁面板、释放实例锁
+  后退出，不动已启动的模块进程。
 - 单实例保护：%TEMP% pid 文件锁（msvcrt 非阻塞锁，进程退出/崩溃自动释放），
   二次启动打印"已在运行"后以非 0 退出码退出。
 
 测试钩子（QC 无头驱动）：
-- UPTIME_AUTO_EXIT=N          N 秒后干净退出（托盘停、热键注销、rc=0）
-- UPTIME_CONSOLE_DUMP=1       不进托盘主循环，构建全部对象（图标/菜单/热键表）
+- UPTIME_AUTO_EXIT=N          N 秒后干净退出（托盘停、热键注销、面板销毁、rc=0）
+- UPTIME_CONSOLE_DUMP=1       不进托盘/面板主循环，构建全部对象（图标/菜单/热键表）
                               后把菜单结构、热键映射、图标 PNG 路径打印到 stdout 退出
 - UPTIME_CONSOLE_LAUNCH=<代号> 执行一次 dispatch（启动或前置）后等子进程结束再退出
 """
@@ -49,16 +59,8 @@ from uptime.common.config import PROJECT_ROOT
 # ---------------------------------------------------------------------------
 WINDOW_TITLE = "uptime - console"   # 自身控制台窗口标题（ASCII 连字符，与各模块一致）
 TOOLTIP = "uptime service"          # 托盘 tooltip（对外形象）
-MODULE_CODES = ("burn", "eta", "tail", "boids", "less", "focus")
-
-DEFAULT_HOTKEYS: dict[str, str] = {
-    "burn": "ctrl+alt+1",
-    "eta": "ctrl+alt+2",
-    "tail": "ctrl+alt+3",
-    "boids": "ctrl+alt+4",
-    "less": "ctrl+alt+5",
-    "focus": "ctrl+alt+6",
-}
+MODULE_CODES = ("burn", "eta", "tail", "boids", "less", "focus")  # 热键容忍全集
+MENU_CODES = ("burn", "eta", "tail", "boids", "less")            # 托盘菜单/面板卡片五模块
 
 TEMP_DIR = Path(tempfile.gettempdir())
 ICON_PATH = TEMP_DIR / "uptime_console_icon.png"
@@ -85,8 +87,8 @@ except ImportError:  # noqa: SIM105 —— 模块级 try/except，main 按模式
 def _console_config(path: str | Path | None = None) -> dict[str, Any]:
     """读取 console 配置段。
 
-    缺段/缺键全取内置默认；hotkeys 缺某模块或某键值非法则跳过该模块（容忍），
-    hotkeys 为空对象则一个热键都不注册；类型非法抛中文 ValueError。
+    缺段/缺键全取内置默认；hotkeys 缺失或空对象=一个热键都不注册（纯鼠标默认），
+    非空时缺某模块或某键值非法则跳过该模块（容忍）；类型非法抛中文 ValueError。
     """
     section = load_config(path).get("console") or {}
     if not isinstance(section, dict):
@@ -94,7 +96,7 @@ def _console_config(path: str | Path | None = None) -> dict[str, Any]:
 
     raw = section.get("hotkeys")
     if raw is None:
-        hotkeys = dict(DEFAULT_HOTKEYS)
+        hotkeys = {}
     elif isinstance(raw, dict):
         hotkeys = {}
         for code in MODULE_CODES:  # 固定模块顺序，只认已知模块代号
@@ -113,7 +115,23 @@ def _console_config(path: str | Path | None = None) -> dict[str, Any]:
         raise ValueError(
             f"配置项 console.minimize_self 必须是布尔值，当前为 {minimize_self!r}"
         )
-    return {"hotkeys": hotkeys, "show_state": show_state, "minimize_self": minimize_self}
+    panel_on_start = section.get("panel_on_start", True)
+    if not isinstance(panel_on_start, bool):
+        raise ValueError(
+            f"配置项 console.panel_on_start 必须是布尔值，当前为 {panel_on_start!r}"
+        )
+    close_to_tray = section.get("close_to_tray", True)
+    if not isinstance(close_to_tray, bool):
+        raise ValueError(
+            f"配置项 console.close_to_tray 必须是布尔值，当前为 {close_to_tray!r}"
+        )
+    return {
+        "hotkeys": hotkeys,
+        "show_state": show_state,
+        "minimize_self": minimize_self,
+        "panel_on_start": panel_on_start,
+        "close_to_tray": close_to_tray,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +320,7 @@ def _module_text(code: str, show_state: bool):
 
 
 def _build_menu(cfg: dict[str, Any]) -> "pystray.Menu":
-    """六模块项 + 分隔线 + exit。"""
+    """五模块项 + 分隔线 + panel 项 + exit。"""
     show_state = bool(cfg["show_state"])
 
     def _action(code: str):
@@ -311,13 +329,20 @@ def _build_menu(cfg: dict[str, Any]) -> "pystray.Menu":
 
         return _on_click
 
-    def _on_exit(icon: Any, _item: Any) -> None:
-        icon.stop()  # run() 返回 → finally 清理 → 进程退出；不动已启动的模块进程
+    def _on_panel(_icon: Any, _item: Any) -> None:
+        app = _panel_app
+        if app is not None:
+            app.show()
+
+    def _on_exit(_icon: Any, _item: Any) -> None:
+        _shutdown()  # 停托盘 + 销毁面板 → finally 清理 → 进程退出；不动已启动模块
 
     items: list[Any] = [
         pystray.MenuItem(_module_text(code, show_state), _action(code))
-        for code in MODULE_CODES
+        for code in MENU_CODES
     ]
+    items.append(pystray.Menu.SEPARATOR)
+    items.append(pystray.MenuItem("panel", _on_panel))
     items.append(pystray.Menu.SEPARATOR)
     items.append(pystray.MenuItem("exit", _on_exit))
     return pystray.Menu(*items)
@@ -333,7 +358,9 @@ def _dispatch_quiet(code: str, source: str) -> None:
 
 
 def _register_hotkeys(cfg: dict[str, Any]) -> dict[str, str]:
-    """按 console.hotkeys 注册全局热键（行为=dispatch）。失败告警跳过，不崩。"""
+    """按 console.hotkeys 注册全局热键（行为=dispatch）。空表=一个不注册。失败告警跳过，不崩。"""
+    if not cfg["hotkeys"]:
+        return {}
     try:
         import keyboard
     except ImportError as exc:
@@ -369,6 +396,56 @@ def _set_window_title() -> None:
             win32gui.SetWindowText(hwnd, WINDOW_TITLE)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _free_console() -> bool:
+    """消灭自身控制台黑窗：GetConsoleWindow 存在才 FreeConsole（最后一个归属
+    进程脱离后 conhost 连窗口一起销毁）。无控制台（服务态/管道启动）返回 False。"""
+    try:
+        if _kernel32.GetConsoleWindow():
+            _kernel32.FreeConsole()
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _detach_stdio() -> None:
+    """FreeConsole 后原 stdout 句柄失效：重定向到 devnull，保证后续 print 安全。"""
+    try:
+        devnull = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 —— 常驻进程持有到退出
+        sys.stdout = devnull
+        sys.stderr = devnull
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# 壳生命周期：托盘 + 面板统一退出路径（exit 菜单 / 面板退出按钮 / AUTO_EXIT 共用）
+# ---------------------------------------------------------------------------
+_panel_app: Any = None    # uptime.panel.PanelApp（托盘 panel 项 / 退出路径引用）
+_icon_ref: Any = None     # pystray.Icon
+_shutdown_done = False
+
+
+def _shutdown() -> None:
+    """整壳干净退出（可从任意线程调）：停托盘 → 请求面板退出 mainloop。幂等。"""
+    global _shutdown_done
+    if _shutdown_done:
+        return
+    _shutdown_done = True
+    icon = _icon_ref
+    if icon is not None:
+        try:
+            icon.stop()
+        except Exception:  # noqa: BLE001
+            pass
+    app = _panel_app
+    if app is not None:
+        try:
+            app.request_quit()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _start_menu_refresher(icon: "pystray.Icon") -> threading.Event:
@@ -468,7 +545,7 @@ def _dump_label(code: str, show_state: bool) -> str:
 
 
 def _dump_mode(cfg: dict[str, Any]) -> None:
-    """结构自检：构建图标/菜单/热键表全部对象，打印结构后退出（不进托盘主循环）。"""
+    """结构自检：构建图标/菜单/热键表全部对象，打印结构后退出（不进托盘/面板主循环）。"""
     icon_png = _ensure_icon_png()
     _build_menu(cfg)  # 构建真实菜单对象（副作用校验 pystray 结构合法）
     with Image.open(icon_png) as probe:
@@ -476,11 +553,12 @@ def _dump_mode(cfg: dict[str, Any]) -> None:
     lines = [
         f"tooltip: {TOOLTIP}",
         f"window_title: {WINDOW_TITLE}",
-        f"menu_items: {len(MODULE_CODES) + 1}",
+        f"menu_items: {len(MENU_CODES) + 2}",
     ]
-    for code in MODULE_CODES:
+    for code in MENU_CODES:
         lines.append(f"menu_item: {_dump_label(code, cfg['show_state'])}")
-    lines.append("menu_sep: 1")
+    lines.append("menu_sep: 2")
+    lines.append("menu_item: panel")
     lines.append("menu_item: exit")
     for code, key in cfg["hotkeys"].items():
         lines.append(f"hotkey: {code}={key}")
@@ -534,19 +612,21 @@ def main() -> None:
         _launch_mode(cfg, launch)
         return
 
-    # ---- 托盘常驻模式 ----
+    # ---- 托盘 + 面板常驻模式 ----
     ok, other_pid = _acquire_lock()
     if not ok:
         print(f"console: 已在运行 (pid={other_pid or 'unknown'})，本次退出")
         sys.exit(2)
 
+    global _panel_app, _icon_ref
+    from uptime.panel import PanelApp  # 延迟导入（panel 反向复用本模块 dispatch）
+
     icon_png = _ensure_icon_png()
     icon = pystray.Icon(
         TOOLTIP, icon=_build_icon_image(), title=TOOLTIP, menu=_build_menu(cfg)
     )
+    _icon_ref = icon
     registered = _register_hotkeys(cfg)
-    if cfg["minimize_self"]:
-        _minimize_self()
 
     stop_refresh: threading.Event | None = None
     if cfg["show_state"]:
@@ -555,13 +635,30 @@ def main() -> None:
     secs = auto_exit_seconds()
     if secs is not None:
         print(f"console: auto exit {secs}s", flush=True)
-        threading.Timer(secs, icon.stop).start()
+        threading.Timer(secs, _shutdown).start()
 
     hotkey_desc = ", ".join(f"{c}={k}" for c, k in registered.items()) or "none"
-    print(f"console: ready (icon={icon_png.name}, hotkeys: {hotkey_desc})", flush=True)
+    print(
+        f"console: ready (icon={icon_png.name}, panel=on, hotkeys: {hotkey_desc})",
+        flush=True,
+    )
+
+    # 消灭自身控制台黑窗（双击 exe 场景）；拿不到控制台则按配置最小化兜底
+    if _free_console():
+        _detach_stdio()
+    elif cfg["minimize_self"]:
+        _minimize_self()
+
+    panel = PanelApp(cfg, icon=icon, on_shell_exit=_shutdown)
+    _panel_app = panel
+    if not cfg["panel_on_start"]:
+        panel.start_hidden()  # 只进托盘，面板不显示
+
     try:
-        icon.run()  # 阻塞至 icon.stop()（exit 菜单 / AUTO_EXIT）
+        icon.run_detached()  # 托盘走独立线程；主线程给 tkinter mainloop
+        panel.run()          # 阻塞至面板销毁（exit / AUTO_EXIT / close_to_tray=false 的 X）
     finally:
+        _shutdown()
         try:
             icon.stop()
         except Exception:  # noqa: BLE001
