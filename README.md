@@ -64,7 +64,7 @@ copy config.example.json config.json
 
 | 键 | 含义 | 示例 |
 |---|---|---|
-| `monthly_salary` | 月薪（burn 的今日/本月、金币节奏的算法基础） | `8000` |
+| `monthly_salary` | 月薪（burn 的今日/本月金额算法基础） | `5000` |
 | `monthly_workdays` | 月工作日数（算日薪用） | `21.75` |
 | `work_start` / `work_end` | 上班 / 下班时间（burn 计费区间、eta 倒计时终点） | `"09:00"` / `"18:00"` |
 | `lunch_break_minutes` | 午休分钟（12:00 起，与班内重叠部分不计费） | `60` |
