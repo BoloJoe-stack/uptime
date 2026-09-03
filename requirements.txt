@@ -1,9 +1,9 @@
-# ---- 阶段 0 生效 ----
-rich>=13.7
+# uptime 运行时依赖（pip install -r requirements.txt）
+rich>=13.7        # 终端渲染（tail 等模块）
+keyboard          # 全局热键（focus / 老板键）
+pywin32           # Windows 窗口枚举与前置（focus）
+pystray           # 系统托盘（console）
+Pillow            # 托盘图标 + burn 挂件像素金币渲染
 
-# ---- 以下依赖 阶段3+启用（届时取消注释并安装）----
-keyboard       # 阶段3+启用：全局热键（focus / less 皮肤切换）
-pywin32        # 阶段3+启用：Windows 窗口枚举与前置（focus）
-pystray         # 阶段3+启用：系统托盘常驻（console）
-Pillow          # 阶段3+启用：托盘图标绘制（console）
-pyinstaller    # 打包 exe：py -3.10 build_exe.py（产物 dist/uptime.exe，不入库）
+# 打包 exe 才需要：py -3.10 build_exe.py → dist/uptime.exe
+pyinstaller
