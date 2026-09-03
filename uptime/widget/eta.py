@@ -12,6 +12,7 @@ from typing import Any, Callable
 import tkinter as tk
 
 from uptime.burn import compute_stats
+from uptime.common.render import get_now
 from uptime.eta import day_status, load_holidays, next_holiday
 from uptime.widget import WidgetBase
 
@@ -26,6 +27,19 @@ FONT_BIG = ("Consolas", 22, "bold")
 FONT_LABEL = ("Consolas", 10)
 FONT_HOL = ("Consolas", 10, "bold")
 FONT_PCT = ("Consolas", 10, "bold")
+
+
+def _fmt_left(target: datetime, now: datetime) -> str:
+    """到目标的剩余时长（精确到秒）：>=1天 → "Xd HH:MM:SS"，当天 → "HH:MM:SS"。"""
+    secs = int((target - now).total_seconds())
+    if secs <= 0:
+        return "00:00:00"
+    days, rem = divmod(secs, 86400)
+    hh, rem = divmod(rem, 3600)
+    mm, ss = divmod(rem, 60)
+    if days >= 1:
+        return f"{days}d {hh:02d}:{mm:02d}:{ss:02d}"
+    return f"{hh:02d}:{mm:02d}:{ss:02d}"
 
 
 class EtaWidget(WidgetBase):
@@ -84,7 +98,7 @@ class EtaWidget(WidgetBase):
     # -- 每秒刷新 ----------------------------------------------------------
     def _update(self) -> None:
         c = self.canvas
-        now = datetime.now()
+        now = get_now()
         status = day_status(now, self._cfg, self._holidays)
         stats = compute_stats(self._cfg, now)  # 复用其今日进度比例
 
@@ -110,7 +124,8 @@ class EtaWidget(WidgetBase):
         if nh is None:
             c.itemconfigure("hol", text="HOL: no data")
         elif nh["kind"] == "next":
-            c.itemconfigure("hol", text=f"HOL:{nh['name']} {nh['days']}d")
+            target = datetime.combine(nh["date"], datetime.min.time())  # 节日首日 0 点
+            c.itemconfigure("hol", text=f"HOL:{nh['name']} {_fmt_left(target, now)}")
         else:  # 今天正在假日中
             c.itemconfigure("hol", text=f"HOL: now {nh['name']}", fill=C_GREEN)
 
@@ -124,7 +139,7 @@ class EtaWidget(WidgetBase):
 
     def _last_main(self) -> str:
         """光标闪烁重画用：重算主行（轻量，一天最多 172800 次，无压力）。"""
-        now = datetime.now()
+        now = get_now()
         status = day_status(now, self._cfg, self._holidays)
         if status["kind"] == "on":
             secs = int(status["remaining"].total_seconds())
