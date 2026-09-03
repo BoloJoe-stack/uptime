@@ -90,6 +90,22 @@ class WidgetBase(tk.Toplevel):
         self._apply_saved_pos()
         _dbg(f"{self.CODE} pos now {self.winfo_x()},{self.winfo_y()}")
 
+    def _add_min_button(self, canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int,
+                        *, fill: str, outline: str, glyph_fill: str) -> None:
+        """最小化（−）按钮：收起挂件；再点面板卡片/托盘项恢复（withdrawn 仍算运行中）。"""
+        canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline,
+                                width=2, tags="minbox")
+        canvas.create_text((x1 + x2) // 2, (y1 + y2) // 2 + 1, text="—",
+                           font=("Segoe UI", 10, "bold"), fill=glyph_fill, tags="min")
+        for t in ("minbox", "min"):
+            canvas.tag_bind(t, "<Button-1>", lambda e: "break")
+            canvas.tag_bind(t, "<ButtonRelease-1>", lambda e: self.minimize())
+
+    def minimize(self) -> None:
+        """收起挂件（withdraw）；恢复走 toggle_widget→show。"""
+        _dbg(f"{self.CODE} minimized")
+        self.hide()
+
     # -- 子类接口 ----------------------------------------------------------
     def _render(self) -> None:  # pragma: no cover - 子类实现
         raise NotImplementedError

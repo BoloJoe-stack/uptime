@@ -65,13 +65,15 @@ class BurnWidget(WidgetBase):
         # 硬投影 + 主卡 + 粗黑边
         c.create_rectangle(5, 5, W, H, fill=C_INK, outline=C_INK)
         c.create_rectangle(0, 0, M, H - 5, fill=C_BG, outline=C_INK, width=4)
-        # 波点（水印感金褐 dots）：头部中部一小片，避开×按钮
+        # 波点（水印感金褐 dots）：头部中部一小片，避开 −/× 按钮
         for gy in range(18, 45, 9):
-            for gx in range(M - 130, M - 48, 9):
+            for gx in range(M - 156, M - 66, 9):
                 c.create_oval(gx, gy, gx + 3, gy + 3, fill=C_DOT, outline=C_DOT)
         # 头部
         c.create_text(16, 28, anchor="w", text="今日已赚", font=FONT_HEAD, fill=C_INK)
-        # × 关闭钮（黑块白×，独立 tag 拦截拖动）
+        # − 最小化钮 + × 关闭钮（黑块白字，独立 tag 拦截拖动）
+        self._add_min_button(c, M - 58, 10, M - 36, 32,
+                             fill=C_INK, outline=C_INK, glyph_fill=C_WHITE)
         c.create_rectangle(M - 32, 10, M - 10, 32, fill=C_INK, outline=C_INK, tags="closebox")
         c.create_text(M - 21, 21, text="✕", font=("Segoe UI", 11, "bold"), fill=C_WHITE, tags="close")
         c.tag_bind("closebox", "<Button-1>", lambda e: "break")

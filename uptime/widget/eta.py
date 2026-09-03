@@ -58,6 +58,8 @@ class EtaWidget(WidgetBase):
             c.create_line(x1, y1, x1, y1 + dy * t, fill=C_GREEN, width=2)
         # 头部
         c.create_text(20, 26, anchor="w", text="ETA", font=FONT_LABEL, fill=C_DIM)
+        self._add_min_button(c, W - 60, 12, W - 38, 34,
+                             fill=C_BG, outline=C_DIM, glyph_fill=C_GREEN)
         c.create_rectangle(W - 34, 12, W - 12, 34, outline=C_DIM, width=2, tags="closebox")
         c.create_text(W - 23, 23, text="✕", font=("Segoe UI", 10, "bold"),
                       fill=C_GREEN, tags="close")
