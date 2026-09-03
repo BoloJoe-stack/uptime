@@ -76,7 +76,7 @@ class BurnWidget(WidgetBase):
         except Exception:  # noqa: BLE001 —— 假日数据异常按无假日处理
             self._holidays = {"off_days": {}, "extra_workdays": []}
         self._tick_no = 0
-        self._last_floor: int | None = None  # 上次今日已赚的整元（进位才抛美钞）
+        self._last_yuan: int | None = None  # 上次显示金额的整元（个位数+1 才抛美钞）
         super().__init__(root, cfg, on_close)
 
     # -- 首次绘制 ----------------------------------------------------------
@@ -128,13 +128,14 @@ class BurnWidget(WidgetBase):
         self._tick_no += 1
 
         # 动画：金币 = 上班中每秒在右侧弹一枚（取代原 +秒薪 数字，纯装饰不带数值）；
-        #       美钞 = 今日金额每跨一个整元（如 12.34→13.00）时，从数字右上方抛一小把
-        floor = int(stats.earned)
+        #       美钞 = 显示金额的个位数 +1（如 ¥12.99→¥13.00）那一帧就抛，不滞后——
+        #       金额是四舍五入到分显示的，整元要用 round(元×100) 而不是 int(元) 截断
+        yuan = int(round(stats.earned * 100)) // 100
         if stats.state == "during":
             self._coin_pop()
-            if self._last_floor is not None and floor > self._last_floor:
+            if self._last_yuan is not None and yuan > self._last_yuan:
                 self._bill_burst()
-        self._last_floor = floor
+        self._last_yuan = yuan
 
         real = f"¥ {stats.earned:,.2f}"
         shown = real if self._hover else "¥ --.--"
