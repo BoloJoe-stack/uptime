@@ -2,7 +2,7 @@
 
 米白纸底+黑边硬投影+金褐水印波点；金额（今日/本月）一律美钞绿墨，默认打码、鼠标悬停显真值。
 两处小动画：①上班中每秒在金额右侧（原 +秒薪 位置）弹一枚小金币，飘起即淡没；
-②「今日已赚」金额每跨过整元（如 12.34→13.00）时，从数字右上方抛一小把美钞小方块。
+②上班中每 5 秒从数字右上方抛一小把美钞小方块。
 进度条口径 = 发薪周期：每月 10 号 18:00 发薪（逢周末/节假日提前到前一个工作日），
 发薪瞬间进度归 0、整月线性爬向满格（下次发薪 = 100%），条下方配「距发薪 X天X时」倒计时。
 计算复用 uptime.burn 的纯函数，本模块只做皮肤。
@@ -131,7 +131,7 @@ class BurnWidget(WidgetBase):
         except Exception:  # noqa: BLE001 —— 假日数据异常按无假日处理
             self._holidays = {"off_days": {}, "extra_workdays": []}
         self._tick_no = 0
-        self._last_yuan: int | None = None  # 上次显示金额的整元（个位数+1 才抛美钞）
+        self._since_bill = 0  # 距上次抛美钞经过的上班秒数（每 5 秒抛一次）
         self._coin_photos: dict[str, list[ImageTk.PhotoImage]] = {}  # 金币图引用防回收
         super().__init__(root, cfg, on_close)
 
@@ -183,15 +183,14 @@ class BurnWidget(WidgetBase):
         stats = compute_stats(self._cfg, now)
         self._tick_no += 1
 
-        # 动画：金币 = 上班中每秒在右侧弹一枚（取代原 +秒薪 数字，纯装饰不带数值）；
-        #       美钞 = 显示金额的个位数 +1（如 ¥12.99→¥13.00）那一帧就抛，不滞后——
-        #       金额是四舍五入到分显示的，整元要用 round(元×100) 而不是 int(元) 截断
-        yuan = int(round(stats.earned * 100)) // 100
+        # 动画：金币 = 上班中每秒在右侧弹一枚；美钞 = 上班中每 5 秒抛一小把
+        #       （都只上班中触发、纯装饰不带数值）
         if stats.state == "during":
             self._coin_pop()
-            if self._last_yuan is not None and yuan > self._last_yuan:
+            self._since_bill += 1
+            if self._since_bill >= 5:
+                self._since_bill = 0
                 self._bill_burst()
-        self._last_yuan = yuan
 
         real = f"¥ {stats.earned:,.2f}"
         shown = real if self._hover else "¥ --.--"
@@ -260,9 +259,9 @@ class BurnWidget(WidgetBase):
 
         self.after(40, lambda: _step(0))
 
-    # -- 美钞：金额跨整元时抛一把 ----------------------------------------------
+    # -- 美钞：每 5 秒抛一把 --------------------------------------------------
     def _bill_burst(self) -> None:
-        """今日金额跨过一个整元时，在数字右上方抛一小把美钞小方块（弹起随即淡出）。"""
+        """上班中每 5 秒从今日金额数字右上方抛一小把美钞小方块（弹起随即淡出）。"""
         c = self.canvas
         bb = c.bbox("num")
         if bb is not None:
