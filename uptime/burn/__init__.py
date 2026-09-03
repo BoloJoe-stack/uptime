@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 
 from rich.console import Group, RenderableType
 from rich.live import Live
@@ -30,6 +30,7 @@ from uptime.common import (
     money,
     set_console_title,
 )
+from uptime.eta import is_workday
 
 # 窗口标题：对外伪装格式（ASCII 连字符）
 WINDOW_TITLE = "uptime - burn"
@@ -104,6 +105,68 @@ def compute_stats(cfg: dict, now: datetime) -> BurnStats:
     earned = worked_seconds * per_second
     return BurnStats("during", earned, progress, day_salary,
                      per_second, per_second * 60, per_second * 3600)
+
+
+# ---------------------------------------------------------------------------
+# 发薪周期（进度条口径：每月 PAYDAY_DAY 号 18:00 发薪，逢非工作日前移）
+# ---------------------------------------------------------------------------
+
+# 每月发薪日：10 号 18:00（下班后发）。PAYDAY_DAY 那天不是工作日（周末/法定假日）
+# 时整体「前移」到最近的前一个工作日，发薪时刻仍是 18:00。
+PAYDAY_DAY = 10
+PAYDAY_TIME = dtime(18, 0)
+
+
+def _month_offset(y: int, mo: int, delta: int) -> tuple[int, int]:
+    """(year, month) 顺移 delta 个月（delta 可负），返回新的 (year, month)。"""
+    idx = y * 12 + (mo - 1) + delta
+    return idx // 12, idx % 12 + 1
+
+
+def payday_of(year: int, month: int, cfg: dict, holidays: dict) -> datetime:
+    """某年某月的发薪时刻（含节假日前移）。
+
+    基准 = 当月 PAYDAY_DAY 号 18:00；若当天不是工作日，逐日向前回退到最近的
+    工作日（仍按 18:00 发）。holidays/调休口径与 eta 的 is_workday 一致。
+    """
+    d = date(year, month, PAYDAY_DAY)
+    while not is_workday(d, cfg, holidays):
+        d -= timedelta(days=1)
+    return datetime.combine(d, PAYDAY_TIME)
+
+
+def payday_cycle(now: datetime, cfg: dict, holidays: dict) -> tuple[datetime, datetime, float]:
+    """当前所处的发薪周期。
+
+    返回 (上次发薪时刻, 下次发薪时刻, 进度 0.0~1.0)。进度 = 距上次发薪已过时长 /
+    整个周期时长，线性推进；到下次发薪瞬间（now == 下次发薪）进度归 0 重新开新周期
+    ——「发薪即重置」。
+    """
+    y, mo = now.year, now.month
+    # 下次发薪：从本月起向后找第一个严格 > now 的发薪时刻
+    nxt = None
+    for k in range(4):
+        yy, mm = _month_offset(y, mo, k)
+        p = payday_of(yy, mm, cfg, holidays)
+        if p > now:
+            nxt = p
+            break
+    if nxt is None:  # 兜底（极端输入也不抛）：取下月名义值
+        yy, mm = _month_offset(y, mo, 1)
+        nxt = datetime.combine(date(yy, mm, PAYDAY_DAY), PAYDAY_TIME)
+    # 上次发薪：从本月起向前找最后一个 <= now 的发薪时刻
+    last = None
+    for k in range(3):
+        yy, mm = _month_offset(y, mo, -k)
+        p = payday_of(yy, mm, cfg, holidays)
+        if p <= now:
+            last = p
+            break
+    if last is None:  # 兜底同上
+        last = nxt - timedelta(days=28)
+    span = (nxt - last).total_seconds()
+    ratio = 0.0 if span <= 0 else min(max((now - last).total_seconds() / span, 0.0), 1.0)
+    return last, nxt, ratio
 
 
 def _progress_bar(ratio: float, width: int = _BAR_WIDTH) -> str:

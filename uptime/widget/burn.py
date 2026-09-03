@@ -2,6 +2,8 @@
 
 米白纸底+黑边硬投影+金褐水印波点；金额（今日/本月/金币跳动）一律美钞绿墨，
 默认打码、鼠标悬停显真值；每秒 +秒薪 绿字上飘（无爆框，纯数字）。
+进度条口径 = 发薪周期：每月 10 号 18:00 发薪（逢周末/节假日提前到前一个工作日），
+发薪瞬间进度归 0、整月线性爬向满格（下次发薪 = 100%），条下方配「距发薪 X天X时」倒计时。
 计算复用 uptime.burn 的纯函数，本模块只做皮肤。
 """
 
@@ -12,7 +14,8 @@ from typing import Any, Callable
 
 import tkinter as tk
 
-from uptime.burn import compute_stats
+from uptime.burn import compute_stats, payday_cycle
+from uptime.common.render import get_now
 from uptime.eta import is_workday, load_holidays
 from uptime.widget import WidgetBase, _dbg
 
@@ -28,6 +31,7 @@ FONT_HEAD = ("Microsoft YaHei UI", 11, "bold")
 FONT_MONTH = ("Microsoft YaHei UI", 11, "bold")
 FONT_PCT = ("Segoe UI", 10, "bold")
 FONT_COIN = ("Segoe UI", 11, "bold")
+FONT_PAY = ("Microsoft YaHei UI", 10, "bold")  # 底部「距发薪」倒计时行
 
 
 def _earned_month(cfg: dict[str, Any], today_earned: float, now: datetime, holidays: dict) -> float:
@@ -89,16 +93,19 @@ class BurnWidget(WidgetBase):
         # 本月行
         c.create_text(16, 96, anchor="w", text="本月 ¥ --,--", font=FONT_MONTH,
                       fill=C_MONEY, tags="month")
-        # 进度条（黑框：白底+绿墨填充）
+        # 进度条（黑框：白底+绿墨填充；口径 = 发薪周期，见 _update）
         c.create_rectangle(14, 112, 218, 126, fill=C_WHITE, outline=C_INK, width=2, tags="bar_bg")
         c.create_rectangle(15, 113, 15, 125, fill=C_MONEY, outline=C_MONEY, tags="bar_fill")
         c.create_text(232, 119, anchor="w", text="--%", font=FONT_PCT, fill=C_INK, tags="pct")
+        # 底部「距发薪」倒计时行
+        c.create_text(16, 140, anchor="w", text="距发薪 --", font=FONT_PAY,
+                      fill=C_MONEY, tags="paytxt")
         self._update()
 
     # -- 每秒刷新 ----------------------------------------------------------
     def _update(self) -> None:
         c = self.canvas
-        now = datetime.now()
+        now = get_now()
         stats = compute_stats(self._cfg, now)
         self._tick_no += 1
 
@@ -111,12 +118,31 @@ class BurnWidget(WidgetBase):
         c.itemconfigure("month",
                         text=f"本月 ¥ {month:,.0f}" if self._hover else "本月 ¥ --,--")
 
-        ratio = max(0.0, min(1.0, stats.progress))
+        # 进度条 = 发薪周期进度：上次发薪 0% 线性爬向下次发薪满格，发薪瞬间归 0 重开
+        _last_pay, next_pay, cycle = payday_cycle(now, self._cfg, self._holidays)
+        ratio = max(0.0, min(1.0, cycle))
         c.coords("bar_fill", 15, 113, 15 + int(202 * ratio), 125)
         c.itemconfigure("pct", text=f"{ratio * 100:.0f}%")
+        c.itemconfigure("paytxt", text=self._fmt_pay_left(next_pay, now))
 
         if stats.state == "during":
             self._coin_anim(stats.per_second)
+
+    @staticmethod
+    def _fmt_pay_left(next_pay: datetime, now: datetime) -> str:
+        """下次发薪剩余时长 → 「距发薪 X天X时 / X时X分 / X分」。"""
+        left = next_pay - now
+        secs = int(left.total_seconds())
+        if secs <= 0:
+            return "发薪日"
+        days, rem = divmod(secs, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes = rem // 60
+        if days >= 1:
+            return f"距发薪 {days}天{hours:02d}时"
+        if hours >= 1:
+            return f"距发薪 {hours}时{minutes:02d}分"
+        return f"距发薪 {minutes}分"
 
     # -- 金币跳动动画 --------------------------------------------------------
     def _coin_anim(self, per_second: float) -> None:
