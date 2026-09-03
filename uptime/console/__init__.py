@@ -68,6 +68,17 @@ LOCK_PATH = TEMP_DIR / "uptime_console.lock"
 # 二次启动唤起标记：第二实例写、首实例的面板每秒轮询消费（弹出面板）
 SHOW_PANEL_FLAG = TEMP_DIR / "uptime_console_show_panel"
 
+
+def _dbg(msg: str) -> None:
+    """临时诊断日志（排查打包后点卡无响应，与 panel 共用一个文件，定位后移除）。"""
+    try:
+        import time as _t
+
+        with open(TEMP_DIR / "uptime_panel_dbg.log", "a", encoding="utf-8") as f:
+            f.write(f"{_t.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
 
@@ -209,6 +220,13 @@ def _list_module_windows(code: str) -> list[tuple[int, str]]:
 
 def _force_foreground(hwnd: int) -> bool:
     """前置窗口：SetForegroundWindow 被前台锁拒绝时走 AttachThreadInput + 模拟 Alt。"""
+    _dbg(f"force_fg enter hwnd={hwnd} tid={_kernel32.GetCurrentThreadId()}")  # 临时诊断
+    ok = _force_foreground_inner(hwnd)
+    _dbg(f"force_fg exit hwnd={hwnd} ok={ok}")  # 临时诊断
+    return ok
+
+
+def _force_foreground_inner(hwnd: int) -> bool:
     try:
         if win32gui.IsIconic(hwnd):
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
@@ -264,6 +282,10 @@ def _spawn(code: str) -> subprocess.Popen:
     """
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"
+    # 关键：剥掉 PyInstaller 注入的解包标记，否则子 exe 的引导层会校验父进程
+    # （父是 cmd.exe ≠ 本 exe）报 "parent process has different executable" 直接拒启
+    for k in [k for k in env if k.startswith("_MEIPASS") or k.startswith("_PYI")]:
+        env.pop(k)
     title = _module_window_prefix(code)
     cmd_exe = os.environ.get("ComSpec", "cmd.exe")
     if getattr(sys, "frozen", False):
@@ -276,12 +298,14 @@ def _spawn(code: str) -> subprocess.Popen:
         f"& {run} "
         f"& if errorlevel 1 pause"
     )
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         line,
         cwd=str(PROJECT_ROOT),
         env=env,
         creationflags=subprocess.CREATE_NEW_CONSOLE,
     )
+    _dbg(f"spawn {code} pid={proc.pid} line={line!r}")  # 临时诊断
+    return proc
 
 
 def _is_running(code: str) -> bool:

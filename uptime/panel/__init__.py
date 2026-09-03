@@ -100,6 +100,17 @@ PAD_M = 16
 PAD_L = 24
 
 TEMP_DIR = Path(tempfile.gettempdir())
+
+DBG_LOG = TEMP_DIR / "uptime_panel_dbg.log"
+
+
+def _dbg(msg: str) -> None:
+    """临时诊断日志（排查打包后点卡无响应，定位后移除）。"""
+    try:
+        with open(DBG_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:  # noqa: BLE001
+        pass
 ICON_DIR = TEMP_DIR / "uptime_panel_icons"
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -496,6 +507,7 @@ class PanelApp:
     # -- 构建窗口骨架 -------------------------------------------------------
     def _build(self) -> None:
         self.root = tk.Tk()
+        self.root.report_callback_exception = self._dbg_callback_exc
         self.root.title(WINDOW_TITLE)
         self.root.configure(bg=THEME["bg"])
         self.root.geometry(self._default_geometry)
@@ -609,7 +621,7 @@ class PanelApp:
         stop.pack_forget()  # 未运行时隐藏
 
         # 整卡可点：非按钮子控件并入卡片 bindtag，卡片绑定对整卡生效
-        for widget in (card, head, icon_lbl, code_lbl, desc_lbl):
+        for widget in (card, head, icon_lbl, code_lbl, desc_lbl, dot):
             if widget is not card:
                 widget.configure(cursor="hand2")
                 widget.bindtags(widget.bindtags() + (card,))
@@ -866,13 +878,30 @@ class PanelApp:
             pass
 
     # -- 卡片动作：启动/前置、结束 ------------------------------------------
+    def _dbg_callback_exc(self, exc, val, tb) -> None:  # 临时诊断
+        import traceback
+        _dbg("tk callback exception: " + "".join(traceback.format_exception(exc, val, tb)))
+
+    def _dbg_dump_cards(self) -> None:  # 临时诊断：卡片屏幕坐标（供外部模拟点击）
+        try:
+            for code, card in self._card.items():
+                _dbg(
+                    f"card_rect {code} {card.winfo_rootx()},{card.winfo_rooty()} "
+                    f"{card.winfo_width()}x{card.winfo_height()}"
+                )
+        except _swallow:
+            pass
+
     def _activate(self, code: str) -> None:
         """点卡：未运行→启动新控制台窗口；已运行→前置（console.dispatch 同一路径）。"""
+        _dbg(f"activate {code}")
         try:
             result = self._console.dispatch(code)
         except Exception as exc:  # noqa: BLE001 —— UI 回调兜底
+            _dbg(f"activate {code} exception: {exc!r}")
             self._status(f"{code} 启动失败：{exc}", "error")
             return
+        _dbg(f"activate {code} dispatch -> {result}")
         if result == "started":
             self._status(f"{code} 已启动")
         elif result == "foreground":
@@ -949,6 +978,9 @@ class PanelApp:
     def _tick(self) -> None:
         try:
             self.refresh()
+            if not getattr(self, "_dbg_dumped", False):  # 启动时记一次卡片坐标
+                self._dbg_dumped = True
+                self._dbg_dump_cards()
         except _swallow:
             return
         try:
@@ -976,6 +1008,7 @@ class PanelApp:
             pass
 
     def _show_now(self) -> None:
+        _dbg("show_now enter")  # 临时诊断
         try:
             if not self.root.winfo_exists():
                 return
@@ -984,10 +1017,16 @@ class PanelApp:
             self.root.lift()
             self.root.focus_force()
             hwnd = _find_panel_hwnd()
+            _dbg(f"show_now hwnd={hwnd}")  # 临时诊断
             if hwnd:
-                self._console._force_foreground(hwnd)
+                # AttachThreadInput 系调用可能阻塞：挪到后台线程，防卡死 tk 主循环
+                threading.Thread(
+                    target=self._console._force_foreground, args=(hwnd,), daemon=True
+                ).start()
         except _swallow:
-            pass
+            _dbg(f"show_now exc")  # 临时诊断
+        finally:
+            _dbg("show_now exit")  # 临时诊断
 
     def _on_close(self) -> None:
         """X 关闭：hosted+close_to_tray → 隐藏到托盘（进程不死）；否则整壳退出。"""
@@ -1028,6 +1067,14 @@ class PanelApp:
     def run(self) -> None:
         self.refresh()
         self.root.after(1000, self._tick)
+        # 临时自测钩子：UPTIME_PANEL_AUTOTEST="code@delay_sec" 在 tk 线程直调 _activate
+        at = os.environ.get("UPTIME_PANEL_AUTOTEST")
+        if at and "@" in at:
+            at_code, _, at_secs = at.partition("@")
+            if at_code in self._card:
+                _dbg(f"autotest armed {at_code} @{at_secs}s")
+                self.root.after(int(float(at_secs) * 1000),
+                                lambda: self._activate(at_code))
         self.root.mainloop()
 
     # -- 测试钩子：结构清单 --------------------------------------------------
