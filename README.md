@@ -49,18 +49,14 @@ py -3.10 -m pip install -r requirements.txt
 
 配置文件是普通 JSON。**含月薪等隐私，不入库**（`.gitignore` 已排除）。
 
+**不改也能直接跑**——默认用模板里的示例月薪（`5000`）；想设成自己的月薪，只改 `config.json` 里的 `monthly_salary` 一个字段即可。`config.json` **首次运行会自动生成**（源码形态与打包形态一致，不用手动复制）：
+
 | 读取位置 | 说明 |
 |---|---|
-| 源码运行 | 仓库根 `config.json`（不存在则回退入库模板 `config.example.json`） |
-| 打包 exe | `%APPDATA%\uptime\config.json`——首次运行自动用内置模板生成；**exe 旁边不留明文配置** |
+| 源码运行 | 仓库根 `config.json`（缺失时首跑自动从模板生成，gitignored，不弄脏入库模板） |
+| 打包 exe | `%APPDATA%\uptime\config.json`（首跑自动用内置模板生成；**exe 旁边不留明文配置**） |
 
-从模板复制一份并填自己的值：
-
-```
-copy config.example.json config.json
-```
-
-字段：
+字段（一般只需动 `monthly_salary`）：
 
 | 键 | 含义 | 示例 |
 |---|---|---|
@@ -120,7 +116,7 @@ uptime.exe eta             # 直接开 eta 挂件
 ## 6. 别人要"一样的效果"的清单
 
 1. `git clone` 本仓库，`py -3.10 -m pip install -r requirements.txt`
-2. `copy config.example.json config.json`，把 `monthly_salary` 改成自己的月薪，上下班/午休/工作日按自己情况改
+2. 直接跑即可（首跑自动生成 `config.json`）；想设成自己的月薪就改 `config.json` 里的 `monthly_salary` 一处（上下班/午休/工作日也可按需改）
 3. 确认 `data/holidays.json` 的 `year` 等于当前年份（过期的年份要更新）
 4. `py -3.10 -m uptime.burn` / `uptime.eta`（或按 §5 打包 exe）
 

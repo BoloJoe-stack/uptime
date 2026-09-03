@@ -87,7 +87,13 @@ def _user_config_path() -> Path | None:
 
 
 def _default_config_path() -> Path:
-    """config.json 优先，其次 config.example.json，都没有则报错。"""
+    """config.json 优先，缺失时自动生成；都没有则报错。
+
+    打包形态在 %APPDATA%\\uptime；源码形态在仓库根。两者口径一致：
+    config.json（含月薪，已被 .gitignore 排除）缺失时自动从内置模板复制生成——
+    下载者零配置可跑，面板/挂件位置的写回也只落进 gitignored 的 config.json，
+    不会弄脏入库的 config.example.json 模板。
+    """
     if getattr(sys, "frozen", False):
         p = _user_config_path()
         if p is not None and p.is_file():
@@ -96,12 +102,18 @@ def _default_config_path() -> Path:
         if bundled.is_file():
             return bundled
         raise ValueError("未找到配置文件：用户目录 config.json 与内置模板均不存在")
-    for name in ("config.json", "config.example.json"):
-        candidate = PROJECT_ROOT / name
-        if candidate.is_file():
-            return candidate
+    cfg_p = PROJECT_ROOT / "config.json"
+    example = PROJECT_ROOT / "config.example.json"
+    if cfg_p.is_file():
+        return cfg_p
+    if example.is_file():
+        try:
+            cfg_p.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+            return cfg_p
+        except OSError:
+            return example
     raise ValueError(
-        f"未找到配置文件：{PROJECT_ROOT / 'config.json'} 与 config.example.json 均不存在"
+        f"未找到配置文件：{cfg_p} 与 config.example.json 均不存在"
     )
 
 
