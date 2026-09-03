@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import time
 import tkinter as tk
 from typing import Any, Callable
 
@@ -126,14 +127,25 @@ class WidgetBase(tk.Toplevel):
             self._update()
 
     def _tick(self) -> None:
+        """每秒刷新，并把下一次安排在**真实整秒边界**之后几毫秒。
+
+        after(1000) 会随调用开销漂移、且不与秒边界对齐——秒级倒计时会显得
+        不是干脆的一秒一跳。所有按秒刷新的挂件（burn/eta）都继承本调度。
+        """
         try:
             self._update()
         except Exception:  # noqa: BLE001 —— 刷新异常不终止循环
             pass
         try:
-            self.after(1000, self._tick)
+            self.after(self._ms_to_next_second(), self._tick)
         except tk.TclError:
             pass
+
+    @staticmethod
+    def _ms_to_next_second() -> int:
+        """距下一个整秒还有多少毫秒（多留 5ms 余量，确保已翻到新秒）。"""
+        ms = int(time.time() * 1000) % 1000
+        return max(1000 - ms + 5, 5)
 
     def show(self) -> None:
         """显示并置前（菜单/卡片二次点击/隐身恢复路径）。"""
