@@ -34,7 +34,7 @@ C_WHITE = "#FFFFFF"
 
 # 泰拉瑞亚金币（Gold Coin）像素贴图：以官方 12×16 图标逐像素复刻
 # （terraria.wiki.gg Gold Coin，透明底、7 色），缩放 COIN_SCALE× 画出。
-COIN_SCALE = 2
+COIN_SCALE = 1   # 用户嫌大缩到 1 倍原尺寸（原 2 → 线性减半）
 _COIN_PAL = {
     "A": "#5C4308", "B": "#CCB548", "C": "#FFF9B7", "D": "#4C2D08",
     "E": "#947E18", "F": "#EEDA7A", "G": "#7A5C0A",
@@ -212,19 +212,17 @@ class BurnWidget(WidgetBase):
 
     @staticmethod
     def _fmt_pay_left(next_pay: datetime, now: datetime) -> str:
-        """下次发薪剩余时长 → 「距发薪 X天X时 / X时X分 / X分」。"""
+        """下次发薪剩余时长 → 「距发薪 X天 HH:MM:SS」（精确到秒，每秒跳动）。"""
         left = next_pay - now
         secs = int(left.total_seconds())
         if secs <= 0:
-            return "发薪日"
+            return "发薪日!"
         days, rem = divmod(secs, 86400)
-        hours, rem = divmod(rem, 3600)
-        minutes = rem // 60
+        hh, rem = divmod(rem, 3600)
+        mm, ss = divmod(rem, 60)
         if days >= 1:
-            return f"距发薪 {days}天{hours:02d}时"
-        if hours >= 1:
-            return f"距发薪 {hours}时{minutes:02d}分"
-        return f"距发薪 {minutes}分"
+            return f"距发薪 {days}天 {hh:02d}:{mm:02d}:{ss:02d}"
+        return f"距发薪 {hh:02d}:{mm:02d}:{ss:02d}"
 
     # -- 金币：每秒弹一枚（泰拉瑞亚风像素金币）-----------------------------
     def _coin_pop(self) -> None:
