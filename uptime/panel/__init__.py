@@ -3,7 +3,7 @@
 对外形象＝服务监控面板：深色底、卡片网格、状态点、克制绿色高亮；
 窗口标题 "uptime - panel"，文案全部中性（监控/dashboard 风）。
 
-结构：顶栏（标题+副标+运行中计数）→ 五模块卡片网格（burn/eta/tail/boids/less，
+结构：顶栏（标题+副标+运行中计数）→ 四模块卡片网格（burn/eta/tail/boids，
 点卡=未运行启动 / 已运行前置，运行中高亮+结束按钮，状态每秒刷新）→
 收起/恢复按钮（一键最小化面板+全部 "uptime - " 模块窗口）→
 设置区（月薪/上下班时间/午休/每周工作日/托盘状态标记，可折叠，失焦即时校验，
@@ -64,7 +64,6 @@ PANEL_CARDS: tuple[tuple[str, str], ...] = (
     ("eta", "交付倒计时"),
     ("tail", "构建日志流"),
     ("boids", "集群状态模拟"),
-    ("less", "日志分页器"),
 )
 
 THEME: dict[str, str] = {
@@ -287,10 +286,6 @@ def _draw_card_icon(code: str):
             )
         for cx, cy in ((28, 148), (76, 156), (124, 150)):
             d.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=dim)
-    else:  # less：pager 行 + 折角
-        for y in (44, 76, 108):
-            d.line([(28, y), (148, y)], fill=accent, width=bold)
-        d.line([(60, 128), (88, 152), (116, 128)], fill=accent, width=bold, joint="curve")
     return img.resize((_ICON_PX, _ICON_PX), Image.LANCZOS)
 
 

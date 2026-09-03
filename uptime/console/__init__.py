@@ -12,7 +12,7 @@
   显示，false 只进托盘。
 - 面板 X 关闭：close_to_tray=true（默认）隐藏窗口到托盘、进程不死；
   false 则 X=整壳干净退出。托盘 "panel" 项=显示/前置面板。
-- 托盘菜单：五模块项（burn/eta/tail/boids/less）+ panel 项 + exit。
+- 托盘菜单：四模块项（burn/eta/tail/boids）+ panel 项 + exit。
   点击未运行模块 → 新控制台窗口启动（Popen CREATE_NEW_CONSOLE，cwd=仓库根，
   env 继承并加 PYTHONUTF8=1；子模块异常退出码非 0 时窗口 pause 不闪退）；
   点击已运行模块（本壳启动的，按子进程存活判断；或桌面上已有该模块窗口）→
@@ -59,8 +59,8 @@ from uptime.common.config import PROJECT_ROOT
 # ---------------------------------------------------------------------------
 WINDOW_TITLE = "uptime - console"   # 自身控制台窗口标题（ASCII 连字符，与各模块一致）
 TOOLTIP = "uptime service"          # 托盘 tooltip（对外形象）
-MODULE_CODES = ("burn", "eta", "tail", "boids", "less", "focus")  # 热键容忍全集
-MENU_CODES = ("burn", "eta", "tail", "boids", "less")            # 托盘菜单/面板卡片五模块
+MODULE_CODES = ("burn", "eta", "tail", "boids", "focus")  # 热键容忍全集
+MENU_CODES = ("burn", "eta", "tail", "boids")             # 托盘菜单/面板卡片四模块
 
 TEMP_DIR = Path(tempfile.gettempdir())
 ICON_PATH = TEMP_DIR / "uptime_console_icon.png"
@@ -346,7 +346,7 @@ def _module_text(code: str, show_state: bool):
 
 
 def _build_menu(cfg: dict[str, Any]) -> "pystray.Menu":
-    """五模块项 + 分隔线 + panel 项 + exit。"""
+    """四模块项 + 分隔线 + panel 项 + exit。"""
     show_state = bool(cfg["show_state"])
 
     def _action(code: str):
