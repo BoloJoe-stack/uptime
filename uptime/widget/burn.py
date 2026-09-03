@@ -16,6 +16,8 @@ from typing import Any, Callable
 
 import tkinter as tk
 
+from PIL import Image, ImageTk
+
 from uptime.burn import compute_stats, payday_cycle
 from uptime.common.render import get_now
 from uptime.eta import is_workday, load_holidays
@@ -28,10 +30,33 @@ C_MONEY = "#1E7A34"   # 美钞绿墨（金额/进度条）
 C_BILL = "#2E9E46"    # 弹起的美钞（更亮一档绿，视觉主角）
 C_BILL_GOLD = "#C9B458"  # 偶发一张金褐钞票点缀（与水印波点同色系）
 C_DOT = "#C9B458"     # 金褐水印波点
-C_COIN_EDGE = "#B8860B"  # 金币外圈（深金）
-C_COIN = "#F5C542"       # 金币币面（金）
-C_COIN_LIT = "#FFE28A"   # 金币高光（浅金）
 C_WHITE = "#FFFFFF"
+
+# 泰拉瑞亚金币（Gold Coin）像素贴图：以官方 12×16 图标逐像素复刻
+# （terraria.wiki.gg Gold Coin，透明底、7 色），缩放 COIN_SCALE× 画出。
+COIN_SCALE = 2
+_COIN_PAL = {
+    "A": "#5C4308", "B": "#CCB548", "C": "#FFF9B7", "D": "#4C2D08",
+    "E": "#947E18", "F": "#EEDA7A", "G": "#7A5C0A",
+}
+_COIN_ROWS = [
+    "    AAAA    ",
+    "    AAAA    ",
+    "  AABBCCAA  ",
+    "  AABBCCAA  ",
+    "DDBBEEBBCCAA",
+    "DDBBEEBBCCAA",
+    "DDBBEECCFFAA",
+    "DDBBEECCFFAA",
+    "DDEEGGFFBBDD",
+    "DDEEGGFFBBDD",
+    "DDEEGGGGBBDD",
+    "DDEEGGGGBBDD",
+    "  DDEEBBDD  ",
+    "  DDEEBBDD  ",
+    "    DDDD    ",
+    "    DDDD    ",
+]
 
 FONT_NUM = ("Segoe UI", 21, "bold")
 FONT_HEAD = ("Microsoft YaHei UI", 11, "bold")
@@ -51,6 +76,36 @@ def _mix_hex(a: str, b: str, t: float) -> str:
     return "#%02X%02X%02X" % tuple(rgb)
 
 
+def _coin_fade_frames() -> list[Image.Image]:
+    """泰拉瑞亚金币贴图 → 8 帧 RGBA 淡出图（1/8…8/8 渐隐到纸底色）。
+
+    每帧在透明底上按 COIN_SCALE 逐像素铺色；运行时用 ImageTk 一次性贴为单图片，
+    动画只换图+移动（不做逐方块变色，避免太重）。
+    """
+    s = COIN_SCALE
+    w = len(_COIN_ROWS[0]) * s
+    h = len(_COIN_ROWS) * s
+    frames: list[Image.Image] = []
+    for step in range(1, 9):
+        t = step / 8.0
+        im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        px = im.load()
+        for r, line in enumerate(_COIN_ROWS):
+            for col, ch in enumerate(line):
+                if ch == " ":
+                    continue
+                colc = _mix_hex(_COIN_PAL[ch], C_BG, t)
+                rgb = (int(colc[1:3], 16), int(colc[3:5], 16), int(colc[5:7], 16))
+                for dy in range(s):
+                    for dx in range(s):
+                        px[col * s + dx, r * s + dy] = (*rgb, 255)
+        frames.append(im)
+    return frames
+
+
+_COIN_PIL_FRAMES = _coin_fade_frames()
+
+
 def _earned_month(cfg: dict[str, Any], today_earned: float, now: datetime, holidays: dict) -> float:
     """本月已赚 = 已过工作日×日薪 + 今日已赚（调休感知）。"""
     daily = cfg["monthly_salary"] / cfg["monthly_workdays"]
@@ -68,7 +123,7 @@ def _earned_month(cfg: dict[str, Any], today_earned: float, now: datetime, holid
 class BurnWidget(WidgetBase):
     CODE = "burn"
     WIDTH = 280
-    HEIGHT = 150
+    HEIGHT = 160   # 底部要放整行「距发薪」文字（含字体行框），150 会被框截断下半
 
     def __init__(self, root, cfg, on_close: Callable[[str], None] | None = None) -> None:
         try:
@@ -77,6 +132,7 @@ class BurnWidget(WidgetBase):
             self._holidays = {"off_days": {}, "extra_workdays": []}
         self._tick_no = 0
         self._last_yuan: int | None = None  # 上次显示金额的整元（个位数+1 才抛美钞）
+        self._coin_photos: dict[str, list[ImageTk.PhotoImage]] = {}  # 金币图引用防回收
         super().__init__(root, cfg, on_close)
 
     # -- 首次绘制 ----------------------------------------------------------
@@ -170,14 +226,20 @@ class BurnWidget(WidgetBase):
             return f"距发薪 {hours}时{minutes:02d}分"
         return f"距发薪 {minutes}分"
 
-    # -- 金币：每秒弹一枚 ----------------------------------------------------
+    # -- 金币：每秒弹一枚（泰拉瑞亚风像素金币）-----------------------------
     def _coin_pop(self) -> None:
-        """上班中每秒在金额右侧弹一枚小金币：飘起一小段随即淡没（无数字，取代原 +秒薪）。"""
+        """上班中每秒在金额右侧抛一枚像素金币（复刻泰拉瑞亚 Gold Coin）：飘起淡没。
+
+        用整张贴图（单图片项）+ 预生成 8 张淡出帧，每帧只换图+移动，O(1) 轻量。
+        """
         c = self.canvas
         tag = f"coin{self._tick_no}_{random.randrange(1000)}"
-        cx, cy = 210.0, 96.0               # 金额右侧空纸区（原 +秒薪 弹字处附近）
-        vx = random.uniform(-0.6, 0.8)
-        vy = random.uniform(-2.3, -1.7)
+        cx, cy0 = 210.0, 88.0              # 金额右侧空纸区（进度条上方，避开本月/美钞）
+        vx = random.uniform(-0.4, 0.5)     # 每帧轻微水平飘
+        vy = -1.6                          # 每帧上飘
+        photos = [ImageTk.PhotoImage(f) for f in _COIN_PIL_FRAMES]
+        self._coin_photos[tag] = photos    # 保住引用，防 Tk 回收
+        item = c.create_image(cx, cy0, image=photos[0], tags=tag)
 
         def _step(k: int) -> None:
             if k > 7:
@@ -185,22 +247,18 @@ class BurnWidget(WidgetBase):
                     c.delete(tag)
                 except tk.TclError:
                     pass
+                self._coin_photos.pop(tag, None)
                 return
             try:
-                c.delete(tag)
+                c.itemconfigure(item, image=photos[k])
+                c.move(tag, vx, vy)
             except tk.TclError:
+                self._coin_photos.pop(tag, None)
                 return
-            x, y = cx + vx * k, cy + vy * k
-            fade = (k + 1) / 8.0
-            c.create_oval(x - 5, y - 5, x + 5, y + 5,
-                          fill=_mix_hex(C_COIN, C_BG, fade),
-                          outline=_mix_hex(C_COIN_EDGE, C_BG, fade), width=1, tags=tag)
-            c.create_oval(x - 3, y - 3, x + 3, y + 3,
-                          outline=_mix_hex(C_COIN_LIT, C_BG, fade), tags=tag)
             try:
                 self.after(40, lambda: _step(k + 1))
             except tk.TclError:
-                return
+                self._coin_photos.pop(tag, None)
 
         self.after(40, lambda: _step(0))
 
