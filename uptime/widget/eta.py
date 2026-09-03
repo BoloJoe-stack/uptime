@@ -1,6 +1,6 @@
 """eta 桌面挂件——赛博 HUD 风。
 
-纯黑底+荧光绿+四角取景框+扫描线+闪烁光标：ETA 大倒计时 + 今日进度 + 下个假期。
+纯黑底+荧光绿+四角取景框+扫描线：ETA 大倒计时（暗绿重影，无闪烁光标）+ 今日进度 + 下个假期。
 计算复用 uptime.eta / uptime.burn 的纯函数，本模块只做皮肤。
 """
 
@@ -52,9 +52,7 @@ class EtaWidget(WidgetBase):
             self._holidays = load_holidays()
         except Exception:  # noqa: BLE001
             self._holidays = {"off_days": {}, "extra_workdays": []}
-        self._cursor_on = True
         super().__init__(root, cfg, on_close)
-        self.after(500, self._blink)
 
     # -- 首次绘制 ----------------------------------------------------------
     def _render(self) -> None:
@@ -81,7 +79,7 @@ class EtaWidget(WidgetBase):
         c.tag_bind("close", "<Button-1>", lambda e: "break")
         c.tag_bind("closebox", "<ButtonRelease-1>", lambda e: self.close())
         c.tag_bind("close", "<ButtonRelease-1>", lambda e: self.close())
-        # 大倒计时（暗绿重影 + 荧光绿封面 + 闪烁光标）
+        # 大倒计时（暗绿重影 + 荧光绿封面；两层每次同文案一起刷新，避免错层残影）
         c.create_text(20, 64, anchor="w", text="--:--:--", font=FONT_BIG,
                       fill=C_DIM, tags="cd_ghost")
         c.create_text(19, 63, anchor="w", text="--:--:--", font=FONT_BIG,
@@ -112,9 +110,9 @@ class EtaWidget(WidgetBase):
         else:
             main = "WEEKEND"
 
-        cur = "_" if self._cursor_on else " "
-        c.itemconfigure("cd", text=main + cur)
-        c.itemconfigure("cd_ghost", text=main + cur)
+        # 主字与暗影层用同一份文案一起刷，绝不同帧错位（否则前一秒数字留残影）
+        c.itemconfigure("cd", text=main)
+        c.itemconfigure("cd_ghost", text=main)
 
         ratio = max(0.0, min(1.0, stats.progress))
         c.coords("bar_fill", 19, 97, 19 + int(202 * ratio), 109)
@@ -130,25 +128,3 @@ class EtaWidget(WidgetBase):
         else:  # 今天正在假日中
             c.itemconfigure("hol", text=f"HOL: now {nh['name']}", fill=C_GREEN)
 
-    def _blink(self) -> None:
-        self._cursor_on = not self._cursor_on
-        try:
-            self.canvas.itemconfigure("cd", text=self._last_main())
-        except tk.TclError:
-            return
-        self.after(500, self._blink)
-
-    def _last_main(self) -> str:
-        """光标闪烁重画用：重算主行（轻量，一天最多 172800 次，无压力）。"""
-        now = get_now()
-        status = day_status(now, self._cfg, self._holidays)
-        if status["kind"] == "on":
-            secs = int(status["remaining"].total_seconds())
-            main = f"{secs // 3600:02d}:{secs % 3600 // 60:02d}:{secs % 60:02d}"
-        elif status["kind"] == "off":
-            main = "OFF-DUTY"
-        elif status["kind"] == "holiday":
-            main = status.get("name", "HOLIDAY")[:9]
-        else:
-            main = "WEEKEND"
-        return main + ("_" if self._cursor_on else " ")
