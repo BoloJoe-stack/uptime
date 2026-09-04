@@ -142,7 +142,16 @@ def main() -> None:
     yes = "--yes" in args
 
     version, date, body = parse_latest_version()
-    print(f"[release] 将发布版本: {version}  ({date})")
+    # 内置版本号必须与 CHANGELOG 一致，否则打包的 exe 自检更新会误判
+    import uptime as _pkg  # uptime/__init__.py 只含常量，导入无副作用
+
+    pkg_ver = str(_pkg.__version__).lstrip("v")
+    if pkg_ver != version.lstrip("v"):
+        sys.exit(
+            f"[release] 版本不一致：uptime/__init__.py __version__={pkg_ver!r} "
+            f"vs CHANGELOG={version}。请先把内置版本号同步再发（否则 exe 自检会误报）。"
+        )
+    print(f"[release] 将发布版本: {version}  ({date})（内置 __version__ 一致）")
     print(f"[release] 更新内容预览:\n{body[:600]}...")
 
     owner, repo = remote_owner_repo()

@@ -22,5 +22,9 @@
     "minimize_self": true,
     "panel_on_start": true,
     "close_to_tray": true
+  },
+  "updater": {
+    "enabled": true,
+    "url": ""
   }
 }

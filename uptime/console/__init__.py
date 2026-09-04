@@ -44,6 +44,7 @@ import sys
 import tempfile
 import threading
 import time
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,7 @@ import pywintypes
 import win32con
 import win32gui
 
-from uptime.common import auto_exit_seconds, load_config, set_console_title
+from uptime.common import auto_exit_seconds, load_config, set_console_title, updater
 from uptime.common.config import PROJECT_ROOT
 
 # ---------------------------------------------------------------------------
@@ -342,6 +343,41 @@ def _dispatch_process(code: str) -> str:
 # ---------------------------------------------------------------------------
 # 托盘：菜单 / 图标 / 热键 / 刷新线程
 # ---------------------------------------------------------------------------
+# 更新检查结果（后台线程写、托盘菜单读；仅在有新版时置 available）
+_update_state: dict[str, Any] = {"available": False, "version": "", "download_url": ""}
+
+
+def _run_update_check(icon: "pystray.Icon", manual: bool) -> None:
+    """后台查一次更新；有新版→标记+刷新菜单+托盘通知；手动无新版→提示已最新。
+    网络失败/禁用一律静默（uptime 对外是监控服务，不打扰）。
+    """
+    info = updater.check_update()
+    try:
+        if info is None:
+            if manual:
+                icon.notify("uptime is up to date", "uptime service")
+            return
+        _update_state.update(
+            available=True,
+            version=info.version,
+            download_url=info.download_url or "",
+        )
+        icon.update_menu()
+        icon.notify(f"uptime v{info.version} available", "uptime service")
+    except Exception:  # noqa: BLE001 —— 托盘已停/通知失败等，安静
+        pass
+
+
+def _start_update_check(icon: "pystray.Icon", manual: bool = False) -> None:
+    """起一个后台线程检查更新；自动检查延迟 ~1.5s 等托盘就绪，手动立即。"""
+    def _go() -> None:
+        if not manual:
+            time.sleep(1.5)
+        _run_update_check(icon, manual)
+
+    threading.Thread(target=_go, daemon=True, name="console-update").start()
+
+
 def _module_text(code: str, show_state: bool):
     """菜单项文本：默认静态代号；show_state 开启时为可调用（打开/刷新菜单时现算）。"""
     if not show_state:
@@ -371,12 +407,31 @@ def _build_menu(cfg: dict[str, Any]) -> "pystray.Menu":
     def _on_exit(_icon: Any, _item: Any) -> None:
         _shutdown()  # 停托盘 + 销毁面板 → finally 清理 → 进程退出；不动已启动模块
 
+    def _on_check(_icon: Any, _item: Any) -> None:
+        _start_update_check(_icon, manual=True)
+
+    def _on_download(_icon: Any, _item: Any) -> None:
+        url = _update_state.get("download_url") or updater.RELEASE_PAGE_URL
+        try:
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            pass
+
     items: list[Any] = [
         pystray.MenuItem(_module_text(code, show_state), _action(code))
         for code in MENU_CODES
     ]
     items.append(pystray.Menu.SEPARATOR)
     items.append(pystray.MenuItem("panel", _on_panel))
+    items.append(pystray.Menu.SEPARATOR)
+    items.append(pystray.MenuItem("check update", _on_check))
+    items.append(
+        pystray.MenuItem(
+            "download update",
+            _on_download,
+            visible=lambda _item: bool(_update_state.get("available")),
+        )
+    )
     items.append(pystray.Menu.SEPARATOR)
     items.append(pystray.MenuItem("exit", _on_exit))
     return pystray.Menu(*items)
@@ -594,12 +649,14 @@ def _dump_mode(cfg: dict[str, Any]) -> None:
     lines = [
         f"tooltip: {TOOLTIP}",
         f"window_title: {WINDOW_TITLE}",
-        f"menu_items: {len(MENU_CODES) + 2}",
+        f"menu_items: {len(MENU_CODES) + 4}",
     ]
     for code in MENU_CODES:
         lines.append(f"menu_item: {_dump_label(code, cfg['show_state'])}")
-    lines.append("menu_sep: 2")
+    lines.append("menu_sep: 3")
     lines.append("menu_item: panel")
+    lines.append("menu_item: check update")
+    lines.append("menu_item: download update")
     lines.append("menu_item: exit")
     for code, key in cfg["hotkeys"].items():
         lines.append(f"hotkey: {code}={key}")
@@ -702,6 +759,7 @@ def main() -> None:
 
     try:
         icon.run_detached()  # 托盘走独立线程；主线程给 tkinter mainloop
+        _start_update_check(icon)  # 后台静默检查更新；有新版→托盘通知+菜单现 download update
         panel.run()          # 阻塞至面板销毁（exit / AUTO_EXIT / close_to_tray=false 的 X）
     finally:
         _shutdown()

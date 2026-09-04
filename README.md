@@ -68,6 +68,8 @@ py -3.10 -m pip install -r requirements.txt
 | `widgets.always_on_top` | 挂件是否置顶 | `true` |
 | `widgets.burn_pos` / `eta_pos` | 两个挂件的屏幕位置（`[x, y]`，拖动会自动保存） | `[2218, 570]` |
 | `hotkeys` / `console.*` / `tail.*` / `focus.*` | 托盘 / 面板 / 终端 / 老板键的设置 | 见 `config.example.json` |
+| `updater.enabled` | 托盘壳启动时是否自动检查更新 | `true` |
+| `updater.url` | 更新源地址；**留空 = GitHub Releases**，填任意"返回兼容 JSON"的源可切到国内直连 | `""` |
 
 > 发薪日固定写死为**每月 10 号 18:00**（代码常量 `PAYDAY_DAY=10` / `PAYDAY_TIME=18:00`，在 `uptime/burn/__init__.py`）；要改发薪日需改代码重打包。
 
@@ -142,10 +144,12 @@ git pull
 - `config.json` 不入库且会自动生成，所以你的**月薪等本地设置不会被覆盖、也不会冲突**
 - `data/holidays.json` 等资源随 pull 一起更新
 
-**打包 exe 方式**——exe 是静态单文件，**不会自动更新**，升级 = 换一个新版 exe 覆盖旧文件：
+**打包 exe 方式**——exe 本体不会覆盖自己，但**托盘壳启动时会自动检查更新**：发现新版会托盘气泡提示、托盘菜单出现 `download update`（点击直达下载页）；也可随时手动点 `check update`。确认更新后 = 换一个新版 exe 覆盖旧文件：
 
 - 手上有源码：`py -3.10 build_exe.py` 自己重打一份
-- 或去仓库 **Releases** 下载最新发布的 `uptime.exe` 直接覆盖即可（真实配置在 `%APPDATA%\uptime\config.json`，换 exe 不丢月薪设置）
+- 或按提示去 **Releases** 下载最新发布的 `uptime.exe` 覆盖即可（真实配置在 `%APPDATA%\uptime\config.json`，换 exe 不丢月薪设置）
+
+> 自动检查默认走 GitHub Releases（需要能连上 github.com）。**网络受限连不上时静默跳过**，不影响任何功能。若想给国内/内网环境配一个可达源：把地址填进 `config.json` 的 `updater.url` 即可，它要求返回与 GitHub Release 兼容的 JSON，具体字段见源码 `uptime/common/updater.py` 顶部注释。
 
 ## 8. 常见坑（不是 bug）
 
