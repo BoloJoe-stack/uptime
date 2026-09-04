@@ -116,7 +116,9 @@ class EtaWidget(WidgetBase):
 
         ratio = max(0.0, min(1.0, stats.progress))
         c.coords("bar_fill", 19, 97, 19 + int(202 * ratio), 109)
-        c.itemconfigure("pct", text=f"{ratio * 100:.0f}%")
+        # 百分比向下取整：ratio==1.0（18:00:00 那一瞬）才显示 100%；
+        # 四舍五入会在约 17:57 起（ratio>=0.995）就满格，过早到 100%
+        c.itemconfigure("pct", text=f"{int(ratio * 100)}%")
 
         nh = next_holiday(now, self._holidays)
         if nh is None:
