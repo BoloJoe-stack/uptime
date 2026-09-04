@@ -25,19 +25,9 @@ def main() -> int:
     _build_icon_image().save(ico, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64)])
     print(f"icon -> {ico}")
 
-    # 2) PyInstaller 单文件：--collect-submodules 收齐全部子包（入口用 runpy 动态分发）
-    sep = ";" if sys.platform == "win32" else ":"
-    cmd = [
-        sys.executable, "-m", "PyInstaller",
-        "--noconfirm", "--clean",
-        "--onefile", "--console",
-        "--name", "uptime",
-        "--icon", str(ico),
-        "--add-data", f"data{sep}data",
-        "--add-data", f"config.example.json{sep}.",
-        "--collect-submodules", "uptime",
-        str(ROOT / "uptime" / "__main__.py"),
-    ]
+    # 2) PyInstaller 单文件：走仓库内定制的 uptime.spec（含瘦身 excludes + 去 PIL 冗余二进制）
+    cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
+           str(ROOT / "uptime.spec")]
     print(" ".join(cmd))
     return subprocess.run(cmd, cwd=str(ROOT)).returncode
 
