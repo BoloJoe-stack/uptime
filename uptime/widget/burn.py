@@ -10,13 +10,15 @@
 
 from __future__ import annotations
 
+import os
 import random
+import time
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import tkinter as tk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from uptime.burn import compute_stats, payday_cycle
 from uptime.common.render import get_now
@@ -31,6 +33,15 @@ C_BILL = "#2E9E46"    # 弹起的美钞（更亮一档绿，视觉主角）
 C_BILL_GOLD = "#C9B458"  # 偶发一张金褐钞票点缀（与水印波点同色系）
 C_DOT = "#C9B458"     # 金褐水印波点
 C_WHITE = "#FFFFFF"
+
+
+def _hex_rgb(hx: str) -> tuple[int, int, int]:
+    """'#RRGGBB' → (r,g,b)。"""
+    return (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16))
+
+
+# 雨片颜色（RGB，供 PIL 整帧渲染；只有绿钞）
+_RAIN_GREEN_RGB = [_hex_rgb(C_MONEY), _hex_rgb(C_BILL)]
 
 # 泰拉瑞亚金币（Gold Coin）像素贴图：以官方 12×16 图标逐像素复刻
 # （terraria.wiki.gg Gold Coin，透明底、7 色），缩放 COIN_SCALE× 画出。
@@ -106,6 +117,8 @@ def _coin_fade_frames() -> list[Image.Image]:
 _COIN_PIL_FRAMES = _coin_fade_frames()
 
 
+
+
 def _earned_month(cfg: dict[str, Any], today_earned: float, now: datetime, holidays: dict) -> float:
     """本月已赚 = 已过工作日×日薪 + 今日已赚（调休感知）。"""
     daily = cfg["monthly_salary"] / cfg["monthly_workdays"]
@@ -133,6 +146,15 @@ class BurnWidget(WidgetBase):
         self._tick_no = 0
         self._since_bill = 0  # 距上次抛美钞经过的上班秒数（每 5 秒抛一次）
         self._coin_photos: dict[str, list[ImageTk.PhotoImage]] = {}  # 金币图引用防回收
+        # 发薪美钞雨：PIL 整帧渲染（粒子不限量、画布只有 1 个对象 → 密且顺）
+        self._rain_on = False
+        self._rain_frame = 0
+        self._rain_bills: list[list] = []     # [x, y, w, h, (r,g,b), vy]
+        self._rain_photos: list[Any] = []     # 双缓冲环，延迟释放去抖动
+        self._rain_item: Any | None = None
+        self._rain_fired_date = None          # 本次发薪日是否已放（防重复）
+        self._prev_clock: datetime | None = None
+        self._pay_demo = os.environ.get("UPTIME_PAYRAIN_NOW") == "1"  # 预览钩子
         super().__init__(root, cfg, on_close)
 
     # -- 首次绘制 ----------------------------------------------------------
@@ -208,6 +230,17 @@ class BurnWidget(WidgetBase):
         c.coords("bar_fill", 15, 113, 15 + int(202 * ratio), 125)
         c.itemconfigure("pct", text=f"{ratio * 100:.0f}%")
         c.itemconfigure("paytxt", text=self._fmt_pay_left(next_pay, now))
+
+        # 发薪到点瞬间（now 刚跨过本次发薪时刻）下高密度美钞雨；同一次发薪只放一次
+        if self._pay_demo:
+            self._pay_demo = False
+            self._start_rain()
+        elif self._prev_clock is not None and _last_pay > self._prev_clock \
+                and (now - _last_pay) <= timedelta(minutes=2) \
+                and self._rain_fired_date != _last_pay.date():
+            self._rain_fired_date = _last_pay.date()
+            self._start_rain()
+        self._prev_clock = now
 
     @staticmethod
     def _fmt_pay_left(next_pay: datetime, now: datetime) -> str:
@@ -308,3 +341,72 @@ class BurnWidget(WidgetBase):
                 return
 
         self.after(45, lambda: _step(0))
+
+    # -- 发薪庆祝：独立小美钞散片雨（同款样式，整组批量移动 → 密又顺） ------
+    def _start_rain(self) -> None:
+        """发薪到点瞬间：同款小美钞「整帧渲染」高密度下落 ~2s，落完自然收。"""
+        if getattr(self, "_rain_on", False):
+            return
+        self._rain_on = True
+        self._rain_frame = 0
+        self._rain_bills = []
+        self._rain_photos = []
+        c = self.canvas
+        c.delete("rain_ov")
+        blank = ImageTk.PhotoImage(
+            Image.new("RGBA", (self.WIDTH, self.HEIGHT), (0, 0, 0, 0)), master=self)
+        self._rain_item = c.create_image(0, 0, image=blank,
+                                         anchor="nw", tags="rain_ov")
+        self._rain_t0 = time.monotonic()
+        self.after(33, self._rain_tick)
+
+    def _rain_tick(self) -> None:
+        if not getattr(self, "_rain_on", False):
+            return
+        try:
+            W, H = self.WIDTH, self.HEIGHT
+            c = self.canvas
+            self._rain_frame += 1
+            # 高密度粒子（~1800，画布仅 1 个 image 对象 → 不受 item 上限限制）
+            if self._rain_frame <= 60:
+                while len(self._rain_bills) < 1800:
+                    w = random.randint(9, 14)
+                    h = random.randint(5, 8)
+                    self._rain_bills.append([
+                        random.uniform(0, W - w), -random.uniform(0, H + 24),
+                        w, h, random.choice(_RAIN_GREEN_RGB),
+                        random.uniform(4.0, 6.2)])
+            # 下落；出底即移除（停止补后自然落完，不戛然而止）
+            remain = []
+            for b in self._rain_bills:
+                x, y, w, h, col, vy = b
+                y += vy
+                if y > H + 8:
+                    continue
+                remain.append([x, y, w, h, col, vy])
+            self._rain_bills = remain
+            # PIL 整帧画到透明底 → 只画钞票，底下卡片内容透过可见
+            im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            for x, y, w, h, col, _vy in self._rain_bills:
+                dark = tuple(int(v * 0.6) for v in col)
+                d.rectangle([int(x), int(y), int(x + w), int(y + h)],
+                            fill=col, outline=dark)
+            ph = ImageTk.PhotoImage(im, master=self)
+            # 双缓冲环：延迟一帧释放旧图 → 消除每帧 GC/销毁抖动
+            self._rain_photos.append(ph)
+            if len(self._rain_photos) > 2:
+                self._rain_photos.pop(0)
+            c.itemconfigure(self._rain_item, image=ph)
+            if self._rain_frame >= 60 and not self._rain_bills:
+                self._rain_on = False
+                c.delete("rain_ov")
+                self._rain_bills = []
+                self._rain_photos = []
+                return
+            # 帧耗时补偿：稳定对齐 ~33ms（30fps），不漂移不忽快忽慢
+            spent = (time.monotonic() - self._rain_t0) * 1000.0
+            self._rain_t0 = time.monotonic()
+            self.after(max(1, int(33 - spent)), self._rain_tick)
+        except tk.TclError:
+            self._rain_on = False
