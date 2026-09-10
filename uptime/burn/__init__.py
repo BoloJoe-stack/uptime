@@ -170,7 +170,8 @@ def payday_cycle(now: datetime, cfg: dict, holidays: dict) -> tuple[datetime, da
 
 
 def _progress_bar(ratio: float, width: int = _BAR_WIDTH) -> str:
-    filled = round(min(max(ratio, 0.0), 1.0) * width)
+    # 向下取整：满格只在到点（ratio==1.0）那一刻之后，不在 97.7% 就撑满（与 eta 挂件同口径）
+    filled = int(min(max(ratio, 0.0), 1.0) * width)
     return "█" * filled + "░" * (width - filled)
 
 

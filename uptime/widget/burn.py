@@ -228,7 +228,10 @@ class BurnWidget(WidgetBase):
         _last_pay, next_pay, cycle = payday_cycle(now, self._cfg, self._holidays)
         ratio = max(0.0, min(1.0, cycle))
         c.coords("bar_fill", 15, 113, 15 + int(202 * ratio), 125)
-        c.itemconfigure("pct", text=f"{ratio * 100:.0f}%")
+        # 百分比向下取整：发薪时刻之前顶格显示 99%，不提前喊 100%——到点即归 0 重开
+        # （满格的仪式感交给那一刻的美钞雨）。四舍五入会在 ratio>=0.995 就显示 100%，
+        # 周期约 31 天 → 足足提前 3.7 小时（发薪日 14:17 就满格），与 eta 同款毛病。
+        c.itemconfigure("pct", text=f"{int(ratio * 100)}%")
         c.itemconfigure("paytxt", text=self._fmt_pay_left(next_pay, now))
 
         # 发薪到点瞬间（now 刚跨过本次发薪时刻）下高密度美钞雨；同一次发薪只放一次
